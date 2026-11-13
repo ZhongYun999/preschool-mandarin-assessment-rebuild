@@ -1,5 +1,6 @@
 from alembic import context
 
+from app import taskbank  # noqa: F401  Registers mapped tables for Alembic.
 from app.database import Base, create_database_engine
 
 config = context.config
