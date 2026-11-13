@@ -10,7 +10,7 @@ from alembic.migration import MigrationContext
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from app import import_batch, taskbank  # noqa: F401
+from app import import_batch, paper, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
 
 
@@ -32,7 +32,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             connection.commit()
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_import_batches"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_paper_drafts"
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
             connection.commit()
@@ -40,12 +40,13 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             functions = text("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
                              "WHERE n.nspname=current_schema() AND p.proname IN "
                              "('guard_task_identity','guard_referenced_asset',"
-                             "'lock_revision_assets','reject_revision_mutation')")
+                             "'lock_revision_assets','reject_revision_mutation',"
+                             "'guard_paper_frozen','guard_paper_entry')")
             assert connection.scalar(functions) == 0
             connection.commit()
             command.upgrade(config, "head")
-            assert connection.scalar(functions) == 4
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_import_batches"
+            assert connection.scalar(functions) == 6
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_paper_drafts"
             connection.commit()
     finally:
         with engine.begin() as connection:
