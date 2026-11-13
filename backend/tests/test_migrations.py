@@ -10,7 +10,7 @@ from alembic.migration import MigrationContext
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from app import taskbank  # noqa: F401
+from app import import_batch, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
 
 
@@ -32,7 +32,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             connection.commit()
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0002_taskbank"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_import_batches"
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
             connection.commit()
@@ -45,7 +45,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             connection.commit()
             command.upgrade(config, "head")
             assert connection.scalar(functions) == 4
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0002_taskbank"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_import_batches"
             connection.commit()
     finally:
         with engine.begin() as connection:

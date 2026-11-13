@@ -53,6 +53,10 @@ python -m unittest discover -s scripts -p 'test_*.py'
 
 `app.taskbank_excel.create_template()` 返回 T1.5 模板的 XLSX 字节；`preflight_xlsx(data)` 读取 XLSX 字节，返回行号、题号、`RevisionContent`、按槽位分组的图片字节及 SHA-256 和带行列位置的问题列表。消费方应先检查 `Preview.valid`；存在错误时不能把部分解析结果当作可提交批次。相同内容与排序的重复题号合并并给出警告，冲突会报错。本阶段不访问数据库、不保存图片，也不判断题目在题库中是新增还是更新。
 
+### 题库导入服务
+
+`preview_import(session, bank_id, xlsx_bytes)` 只读解析并比较题库，返回每题变化及提交基线；预览包含错误时不能提交。`commit_import(engine, ImageStore(root), xlsx_bytes, preview, operation_id)` 先按内容摘要可靠保存图片，再在同一数据库事务中校验基线、写入题目及导入审计。操作 ID 重试返回原结果，输入变更或基线过期会报错。`ImageStore()` 默认使用仓库内被 Git 忽略的 `uploads/taskbank`；可以传入其他本地路径，部署时应确保路径位于仓库外或被 Git 忽略，并保持配置稳定。数据库回滚后可能保留未引用图片，后续可清理。
+
 ## PR 检查
 
 PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 Markdown 修改不安装后端依赖；其他文件（包括依赖、迁移和 CI 配置）保守触发 Ruff、pytest 与 PostgreSQL 迁移检查。未来增加前端或其他模块时应扩展变更分类和对应任务；当前没有空任务。CI 不调用外部付费服务，也不运行全量端到端回归。

@@ -102,6 +102,13 @@ class AppendResult:
     created: bool
 
 
+def revision_fingerprint(content: RevisionContent, image_hashes: dict[str, str]) -> str:
+    """Use one canonical representation for both preview and revision creation."""
+    payload = {"content": asdict(content), "images": image_hashes}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def append_revision(
     session: Session, *, bank_id: UUID, task_code: str, display_order: int | None,
     content: RevisionContent, images: dict[str, UUID],
@@ -137,12 +144,9 @@ def append_revision(
         if asset is None:
             raise ValueError("Image asset does not exist")
         assets[asset_id] = asset
-    payload = {
-        "content": asdict(content),
-        "images": {slot: assets[asset_id].sha256 for slot, asset_id in images.items()},
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    fingerprint = sha256(encoded.encode("utf-8")).hexdigest()
+    fingerprint = revision_fingerprint(
+        content, {slot: assets[asset_id].sha256 for slot, asset_id in images.items()}
+    )
     latest = session.scalar(
         select(TaskRevision).where(TaskRevision.task_id == task.task_id)
         .order_by(TaskRevision.version.desc()).limit(1)
