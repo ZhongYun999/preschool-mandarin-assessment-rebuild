@@ -2,7 +2,7 @@
 
 > 日期：2026-11-13<br>
 > 状态：**SW1.1 收敛修订版**。本版正式确认显式重做语义、关闭后不可撤回、按需人工复核三项业务规则；技术细节仍以【建议】标记，未定业务边界明确留待后续。本稿不授权修改代码、数据库、服务器或旧仓库。<br>
-> 参考：`AGENTS.md`、`VNEXT_INITIAL_ARCHITECTURE_DESIGN.md`、Speaking v1.1、Dialogue v1.0、题库 T1.4、试卷 P1.1、原始评价 R1.0、评分 S1.0、按需评价 E1.0。<br>
+> 参考：`AGENTS.md`、`VNEXT_INITIAL_ARCHITECTURE_DESIGN.md`、Speaking v1.1、Dialogue v1.0、题库 T1.5、试卷 P1.1、原始评价 R1.0、评分 S1.0、按需评价 E1.0。<br>
 > 仓库：新 `ZhongYun999/preschool-mandarin-assessment-rebuild`；旧 `ZhongYun999/preschool-mandarin-assessment` 仅做只读行为审计。
 
 ## 0. 本专项要解决什么
