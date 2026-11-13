@@ -1,0 +1,35 @@
+# Local credentials and secret configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime, local DB, temporary files
+*.sqlite
+*.sqlite3
+*.db
+logs/
+uploads/
+backups/
+tmp/
+*.log
+
+# Frontend build / tooling
+node_modules/
+dist/
+build/
+coverage/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
