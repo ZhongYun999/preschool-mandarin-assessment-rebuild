@@ -19,7 +19,6 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
@@ -29,6 +28,7 @@ class TaskBank(Base):
     __tablename__ = "task_banks"
     bank_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
 
 
 class TaskIdentity(Base):
@@ -65,6 +65,10 @@ class TaskRevision(Base):
     ai_followup_scope: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    option_a_asset_id: Mapped[UUID | None] = mapped_column(ForeignKey("assets.asset_id"))
+    option_b_asset_id: Mapped[UUID | None] = mapped_column(ForeignKey("assets.asset_id"))
+    option_c_asset_id: Mapped[UUID | None] = mapped_column(ForeignKey("assets.asset_id"))
+    question_image_asset_id: Mapped[UUID | None] = mapped_column(ForeignKey("assets.asset_id"))
 
 
 class Asset(Base):
@@ -74,21 +78,6 @@ class Asset(Base):
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
     storage_ref: Mapped[str] = mapped_column(Text, nullable=False)
     media_type: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-class TaskRevisionAsset(Base):
-    __tablename__ = "task_revision_assets"
-    __table_args__ = (
-        CheckConstraint(
-            "slot IN ('option_A', 'option_B', 'option_C', 'question_image')",
-            name="ck_revision_asset_slot",
-        ),
-    )
-    task_revision_id: Mapped[UUID] = mapped_column(
-        ForeignKey("task_revisions.task_revision_id"), primary_key=True
-    )
-    slot: Mapped[str] = mapped_column(Text, primary_key=True)
-    asset_id: Mapped[UUID] = mapped_column(ForeignKey("assets.asset_id"), nullable=False, index=True)
 
 
 @dataclass(frozen=True)
@@ -114,10 +103,10 @@ class AppendResult:
 
 
 def append_revision(
-    engine: Engine, *, bank_id: UUID, task_code: str, display_order: int | None,
+    session: Session, *, bank_id: UUID, task_code: str, display_order: int | None,
     content: RevisionContent, images: dict[str, UUID],
 ) -> AppendResult:
-    """Commit identity, comparison, revision, image links and order as one transaction.
+    """Append within the caller's transaction; the caller owns commit and rollback.
 
     PostgreSQL READ COMMITTED is required: conflict handling and the subsequent
     row lock must observe the preceding writer's committed revision.
@@ -125,49 +114,48 @@ def append_revision(
     slots = {"option_A", "option_B", "option_C", "question_image"}
     if not images.keys() <= slots:
         raise ValueError("Unknown image slot")
-    with Session(engine) as session, session.begin():
-        isolation = session.connection().get_isolation_level()
-        if isolation != "READ COMMITTED":
-            raise ValueError("append_revision requires READ COMMITTED isolation")
-        session.execute(
-            insert(TaskIdentity).values(
-                task_id=uuid4(), bank_id=bank_id, task_code=task_code, display_order=display_order
-            ).on_conflict_do_nothing(index_elements=["bank_id", "task_code"])
+    isolation = session.connection().get_isolation_level()
+    if isolation != "READ COMMITTED":
+        raise ValueError("append_revision requires READ COMMITTED isolation")
+    session.execute(
+        insert(TaskIdentity).values(
+            task_id=uuid4(), bank_id=bank_id, task_code=task_code, display_order=display_order
+        ).on_conflict_do_nothing(index_elements=["bank_id", "task_code"])
+    )
+    task = session.scalar(
+        select(TaskIdentity).where(
+            TaskIdentity.bank_id == bank_id, TaskIdentity.task_code == task_code
+        ).with_for_update().execution_options(populate_existing=True)
+    )
+    task.display_order = display_order
+    assets = {}
+    for asset_id in sorted(set(images.values()), key=str):
+        asset = session.scalar(
+            select(Asset).where(Asset.asset_id == asset_id).with_for_update()
+            .execution_options(populate_existing=True)
         )
-        task = session.scalar(
-            select(TaskIdentity).where(
-                TaskIdentity.bank_id == bank_id, TaskIdentity.task_code == task_code
-            ).with_for_update()
-        )
-        task.display_order = display_order
-        assets = {}
-        for asset_id in sorted(set(images.values()), key=str):
-            asset = session.scalar(select(Asset).where(Asset.asset_id == asset_id).with_for_update())
-            if asset is None:
-                raise ValueError("Image asset does not exist")
-            assets[asset_id] = asset
-        payload = {
-            "content": asdict(content),
-            "images": {slot: assets[asset_id].sha256 for slot, asset_id in images.items()},
-        }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        fingerprint = sha256(encoded.encode("utf-8")).hexdigest()
-        latest = session.scalar(
-            select(TaskRevision).where(TaskRevision.task_id == task.task_id)
-            .order_by(TaskRevision.version.desc()).limit(1)
-        )
-        if latest is not None and latest.content_hash == fingerprint:
-            return AppendResult(task.task_id, latest.task_revision_id, latest.version, False)
-        revision = TaskRevision(
-            task_revision_id=uuid4(), task_id=task.task_id,
-            version=1 if latest is None else latest.version + 1,
-            content_hash=fingerprint, **asdict(content),
-        )
-        session.add(revision)
-        session.flush()
-        session.add_all(
-            TaskRevisionAsset(task_revision_id=revision.task_revision_id, slot=slot, asset_id=asset_id)
-            for slot, asset_id in images.items()
-        )
-        session.flush()
-        return AppendResult(task.task_id, revision.task_revision_id, revision.version, True)
+        if asset is None:
+            raise ValueError("Image asset does not exist")
+        assets[asset_id] = asset
+    payload = {
+        "content": asdict(content),
+        "images": {slot: assets[asset_id].sha256 for slot, asset_id in images.items()},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fingerprint = sha256(encoded.encode("utf-8")).hexdigest()
+    latest = session.scalar(
+        select(TaskRevision).where(TaskRevision.task_id == task.task_id)
+        .order_by(TaskRevision.version.desc()).limit(1)
+    )
+    if latest is not None and latest.content_hash == fingerprint:
+        return AppendResult(task.task_id, latest.task_revision_id, latest.version, False)
+    revision = TaskRevision(
+        task_revision_id=uuid4(), task_id=task.task_id,
+        version=1 if latest is None else latest.version + 1,
+        content_hash=fingerprint, **asdict(content),
+        option_a_asset_id=images.get("option_A"), option_b_asset_id=images.get("option_B"),
+        option_c_asset_id=images.get("option_C"), question_image_asset_id=images.get("question_image"),
+    )
+    session.add(revision)
+    session.flush()
+    return AppendResult(task.task_id, revision.task_revision_id, revision.version, True)

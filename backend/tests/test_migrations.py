@@ -40,7 +40,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             functions = text("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
                              "WHERE n.nspname=current_schema() AND p.proname IN "
                              "('guard_task_identity','guard_referenced_asset',"
-                             "'guard_revision_asset_insert','reject_revision_mutation')")
+                             "'lock_revision_assets','reject_revision_mutation')")
             assert connection.scalar(functions) == 0
             connection.commit()
             command.upgrade(config, "head")
