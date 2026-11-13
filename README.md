@@ -57,6 +57,12 @@ python -m unittest discover -s scripts -p 'test_*.py'
 
 `preview_import(session, bank_id, xlsx_bytes)` 只读解析并比较题库，返回每题变化及提交基线；预览包含错误时不能提交。`commit_import(engine, ImageStore(root), xlsx_bytes, preview, operation_id)` 先按内容摘要可靠保存图片，再在同一数据库事务中校验基线、写入题目及导入审计。操作 ID 重试返回原结果，输入变更或基线过期会报错。`ImageStore()` 默认使用仓库内被 Git 忽略的 `uploads/taskbank`；可以传入其他本地路径，部署时应确保路径位于仓库外或被 Git 忽略，并保持配置稳定。数据库回滚后可能保留未引用图片，后续可清理。
 
+## 教师题库管理 API
+
+设置私有环境变量 `TEACHER_MANAGEMENT_TOKEN` 后，使用 `Authorization: Bearer <token>` 访问 `/teacher` 下的题库管理、题目历史、图片、模板和导入报告接口。未配置 Token 时管理接口不可用；不要把 Token 放入 URL、日志或仓库。此临时共享凭据授予全部教师管理接口访问权，后续可替换为正式身份体系；`/health` 仅返回服务存活状态。
+
+设置 `TASKBANK_ASSET_ROOT` 可以指定 DATA-02B 使用的图片根目录，必须与导入服务保持一致；不配置时使用被 Git 忽略的 `uploads/taskbank`。图片按题库、题目修订和槽位读取并校验内容摘要，接口不返回本地文件路径。题目列表的 `content_summary` 为题干前 120 个字符，查询支持题号子串、学段、题型、`offset` 和 `limit`。
+
 ## PR 检查
 
 PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 Markdown 修改不安装后端依赖；其他文件（包括依赖、迁移和 CI 配置）保守触发 Ruff、pytest 与 PostgreSQL 迁移检查。未来增加前端或其他模块时应扩展变更分类和对应任务；当前没有空任务。CI 不调用外部付费服务，也不运行全量端到端回归。
