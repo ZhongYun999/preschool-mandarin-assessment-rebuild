@@ -25,6 +25,19 @@ from app.taskbank import (
 from app.taskbank_excel import SHEET, TYPE_LABELS, Issue, PreviewRow, preflight_xlsx
 from app.taskbank_storage import ImageStore
 
+
+class InvalidImportPreview(ValueError):
+    """The provided preview does not correspond to a valid input."""
+
+
+class StaleImportPreview(ValueError):
+    """The database has changed since the preview."""
+
+
+class ImportOperationConflict(ValueError):
+    """An operation ID was already committed for different input."""
+
+
 SLOT_COLUMNS = {
     "option_A": "option_a_asset_id",
     "option_B": "option_b_asset_id",
@@ -197,7 +210,7 @@ def preview_import(session: Session, bank_id: UUID, data: bytes) -> ImportPrevie
 
 def _prior_result(batch: ImportBatch, bank_id: UUID, digest: str) -> dict:
     if batch.bank_id != bank_id or batch.source_sha256 != digest:
-        raise ValueError("操作 ID 已用于不同题库或文件")
+        raise ImportOperationConflict("操作 ID 已用于不同题库或文件")
     return batch.result
 
 
@@ -207,15 +220,15 @@ def commit_import(
     """Persist image objects first, then commit all database changes in one transaction."""
     digest = sha256(data).hexdigest()
     if not operation_id or not preview.valid or preview.source_sha256 != digest:
-        raise ValueError("预览无效或与输入文件不一致，请重新预览")
+        raise InvalidImportPreview("预览无效或与输入文件不一致，请重新预览")
     parsed = preflight_xlsx(data)
     if not parsed.valid or any(
         row.content.task_type not in TYPE_LABELS.values() for row in parsed.rows
     ):
-        raise ValueError("文件预检失败或题型不受支持")
+        raise InvalidImportPreview("文件预检失败或题型不受支持")
     expected = {row.task_code: row for row in preview.rows if row.status != "ERROR"}
     if len(expected) != len(parsed.rows) or {row.task_code for row in parsed.rows} != set(expected):
-        raise ValueError("预览题目与输入不一致")
+        raise InvalidImportPreview("预览题目与输入不一致")
     with Session(engine) as session:
         prior = session.get(ImportBatch, operation_id)
         if prior is not None:
@@ -246,7 +259,7 @@ def commit_import(
         for row in sorted(parsed.rows, key=lambda item: item.task_code):
             old = expected[row.task_code].baseline
             if old is None:
-                raise ValueError("预览缺少版本基线，请重新预览")
+                raise InvalidImportPreview("预览缺少版本基线，请重新预览")
             new_id = uuid4()
             created = session.execute(
                 insert(TaskIdentity)
@@ -270,7 +283,7 @@ def commit_import(
             _, revision = _current(session, preview.bank_id, row.task_code)
             actual = Baseline(None, None, None, None) if created else _baseline(task, revision)
             if actual != old:
-                raise ValueError(f"题号 {row.task_code} 的预览基线已变化，请重新预览")
+                raise StaleImportPreview(f"题号 {row.task_code} 的预览基线已变化，请重新预览")
             current = _row_preview(session, preview.bank_id, row)
             if created:
                 current = RowPreview(
