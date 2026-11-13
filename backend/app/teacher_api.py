@@ -5,20 +5,30 @@ from datetime import datetime
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import create_database_engine
 from app.import_batch import ImportBatch
+from app.import_preview_store import PreviewCorrupt, PreviewNotFound, PreviewStore
 from app.taskbank import Asset, TaskBank, TaskIdentity, TaskRevision
 from app.taskbank_excel import create_template
-from app.taskbank_import import SLOT_COLUMNS
+from app.taskbank_import import (
+    SLOT_COLUMNS,
+    ImportOperationConflict,
+    InvalidImportPreview,
+    StaleImportPreview,
+    commit_import,
+    preview_import,
+)
 from app.taskbank_storage import ImageStore
 from app.teacher_auth import require_teacher
 
@@ -41,8 +51,20 @@ def get_image_store() -> ImageStore:
     return ImageStore(Path(root) if root else None)
 
 
+def get_preview_store() -> PreviewStore:
+    load_dotenv()
+    root = os.environ.get("TASKBANK_PREVIEW_ROOT")
+    return PreviewStore(Path(root) if root else None)
+
+
 db_dependency = Depends(get_db)
 store_dependency = Depends(get_image_store)
+preview_store_dependency = Depends(get_preview_store)
+
+
+class ImportConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1)
 
 
 class BankInput(BaseModel):
@@ -331,3 +353,100 @@ def get_import(bank_id: UUID, batch_id: UUID, session: Session = db_dependency):
         "source_sha256": batch.source_sha256,
         "result": batch.result,
     }
+
+
+def _load_preview(store: PreviewStore, preview_id: str, bank_id: UUID):
+    try:
+        return store.load(preview_id, bank_id)
+    except PreviewNotFound:
+        raise HTTPException(
+            status_code=404, detail={"code": "preview_not_found", "message": "预览不存在"}
+        ) from None
+    except PreviewCorrupt:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "preview_corrupt", "message": "预览数据已损坏，请重新预览"},
+        ) from None
+    except OSError:
+        raise HTTPException(
+            status_code=503, detail={"code": "storage_error", "message": "预览存储不可用"}
+        ) from None
+
+
+@router.post("/banks/{bank_id}/import-previews")
+def create_import_preview(
+    bank_id: UUID,
+    file: Annotated[UploadFile, File()],
+    session: Session = db_dependency,
+    store: PreviewStore = preview_store_dependency,
+):
+    _bank(session, bank_id)
+    try:
+        data = file.file.read()
+    except OSError:
+        raise HTTPException(
+            status_code=503, detail={"code": "storage_error", "message": "无法读取上传文件"}
+        ) from None
+    preview = preview_import(session, bank_id, data)
+    if not preview.valid:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "invalid_excel",
+                "message": "Excel 预检失败",
+                "rows": jsonable_encoder(preview.rows),
+                "issues": jsonable_encoder(preview.issues),
+            },
+        )
+    try:
+        preview_id = store.save(data, preview)
+    except OSError:
+        raise HTTPException(
+            status_code=503, detail={"code": "storage_error", "message": "预览存储不可用"}
+        ) from None
+    return {"preview_id": preview_id, "preview": jsonable_encoder(preview)}
+
+
+@router.get("/banks/{bank_id}/import-previews/{preview_id}")
+def get_import_preview(
+    bank_id: UUID,
+    preview_id: str,
+    session: Session = db_dependency,
+    store: PreviewStore = preview_store_dependency,
+):
+    _bank(session, bank_id)
+    _, preview = _load_preview(store, preview_id, bank_id)
+    return {"preview_id": preview_id, "preview": jsonable_encoder(preview)}
+
+
+@router.post("/banks/{bank_id}/import-previews/{preview_id}/confirm")
+def confirm_import(
+    bank_id: UUID,
+    preview_id: str,
+    data: ImportConfirmation,
+    session: Session = db_dependency,
+    store: PreviewStore = preview_store_dependency,
+    images: ImageStore = store_dependency,
+):
+    _bank(session, bank_id)
+    workbook, preview = _load_preview(store, preview_id, bank_id)
+    try:
+        return commit_import(session.get_bind(), images, workbook, preview, data.operation_id)
+    except StaleImportPreview:
+        raise HTTPException(
+            status_code=409, detail={"code": "preview_stale", "message": "题库已变化，请重新预览"}
+        ) from None
+    except ImportOperationConflict:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "operation_conflict", "message": "操作 ID 已用于不同输入"},
+        ) from None
+    except InvalidImportPreview:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "preview_corrupt", "message": "预览数据无效，请重新预览"},
+        ) from None
+    except (OSError, ValueError):
+        raise HTTPException(
+            status_code=503, detail={"code": "storage_error", "message": "导入存储不可用"}
+        ) from None

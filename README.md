@@ -63,6 +63,12 @@ python -m unittest discover -s scripts -p 'test_*.py'
 
 设置 `TASKBANK_ASSET_ROOT` 可以指定 DATA-02B 使用的图片根目录，必须与导入服务保持一致；不配置时使用被 Git 忽略的 `uploads/taskbank`。图片按题库、题目修订和槽位读取并校验内容摘要，接口不返回本地文件路径。题目列表的 `content_summary` 为题干前 120 个字符，查询支持题号子串、学段、题型、`offset` 和 `limit`。
 
+### HTTP 两阶段 Excel 导入
+
+教师凭据适用于所有接口。向 `POST /teacher/banks/{bank_id}/import-previews` 以 multipart `file` 上传 XLSX；有效预览返回 `preview_id`、行级变化及问题，错误文件返回 422 和行列信息。可通过 `GET /teacher/banks/{bank_id}/import-previews/{preview_id}` 恢复预览；确认时向对应的 `/confirm` 发送 JSON `{"operation_id":"调用方稳定生成的标识"}`。确认返回既有导入报告；基线过期和操作 ID 冲突分别以 409 及不同错误代码返回。
+
+原始 XLSX 与预览基线暂存在 `TASKBANK_PREVIEW_ROOT` 指定的私有持久目录，默认 `uploads/import-previews`，被 Git 忽略；配置目录应在所有服务实例间保持一致并限制操作系统访问权限。预览不会自动过期或清理，以支持重启与重试；后续需要运维安排清理，但不要删除仍需确认或重试的预览。
+
 ## PR 检查
 
 PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 Markdown 修改不安装后端依赖；其他文件（包括依赖、迁移和 CI 配置）保守触发 Ruff、pytest 与 PostgreSQL 迁移检查。未来增加前端或其他模块时应扩展变更分类和对应任务；当前没有空任务。CI 不调用外部付费服务，也不运行全量端到端回归。
