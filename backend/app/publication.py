@@ -3,11 +3,12 @@
 import json
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.fixed_audio import AudioStore, FixedAudio, readiness, text_hash, validate_config
 from app.paper import EvaluationPlan, Paper, PaperEntry, _lock_draft
 from app.scoring_registry import PRODUCTION_REGISTRY, Registry
 from app.taskbank import TaskIdentity, TaskRevision
@@ -153,6 +154,7 @@ def publish(
     paper_id: UUID,
     expected_version: int,
     registry: Registry = PRODUCTION_REGISTRY,
+    audio_config: dict | None = None,
 ) -> PublicationPreflight:
     paper = _lock_draft(session, paper_id, expected_version)
     result = preflight_publication(session, paper_id, registry)
@@ -169,6 +171,28 @@ def publish(
                     requirements=entry.requirements,
                 )
             )
+        existing = {
+            row.role: row
+            for row in session.scalars(
+                select(FixedAudio).where(FixedAudio.paper_entry_id == entry.entry_id)
+            ).all()
+        }
+        for role, source in entry.fixed_audio.items():
+            if role in existing:
+                continue
+            config = validate_config(audio_config)
+            session.add(
+                FixedAudio(
+                    audio_id=uuid4(),
+                    paper_entry_id=entry.entry_id,
+                    task_revision_id=entry.revision_id,
+                    role=role,
+                    source_text=source,
+                    text_sha256=text_hash(source),
+                    config=config,
+                    status="PENDING",
+                )
+            )
     session.flush()
     paper.status = "PUBLISHED"
     paper.edit_version += 1
@@ -176,6 +200,5 @@ def publish(
     return result
 
 
-def ready_for_new_session(paper: Paper) -> bool:
-    """No fixed audio resources exist yet; PAPER-02 must replace this boundary."""
-    return False
+def ready_for_new_session(session: Session, paper_id: UUID, store: AudioStore) -> bool:
+    return readiness(session, paper_id, store).ready

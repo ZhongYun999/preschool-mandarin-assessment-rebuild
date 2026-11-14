@@ -184,6 +184,11 @@ def remove_entry(
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
     entry = _entry(session, paper_id, entry_id)
+    from app.fixed_audio import FixedAudio
+
+    for audio in session.scalars(select(FixedAudio).where(FixedAudio.paper_entry_id == entry_id)):
+        session.delete(audio)
+    session.flush()
     plan = session.get(EvaluationPlan, entry_id)
     if plan is not None:
         session.delete(plan)
@@ -198,6 +203,11 @@ def replace_entry(
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
     entry = _entry(session, paper_id, entry_id)
+    from app.fixed_audio import FixedAudio
+
+    for audio in session.scalars(select(FixedAudio).where(FixedAudio.paper_entry_id == entry_id)):
+        session.delete(audio)
+    session.flush()
     plan = session.get(EvaluationPlan, entry_id)
     if plan is not None:
         session.delete(plan)
@@ -226,6 +236,8 @@ def reorder_entries(
 
 
 def copy_paper(session: Session, *, source_id: UUID) -> Paper:
+    from app.fixed_audio import FixedAudio
+
     if session.connection().get_isolation_level() != "READ COMMITTED":
         raise ValueError("Paper copying requires READ COMMITTED isolation")
     source = session.scalar(
@@ -272,4 +284,20 @@ def copy_paper(session: Session, *, source_id: UUID) -> Paper:
                 )
             )
             session.flush()
+        for audio in session.scalars(
+            select(FixedAudio).where(FixedAudio.paper_entry_id == e.paper_entry_id)
+        ):
+            session.add(
+                FixedAudio(
+                    audio_id=uuid4(),
+                    paper_entry_id=new_entry.paper_entry_id,
+                    task_revision_id=audio.task_revision_id,
+                    role=audio.role,
+                    source_text=audio.source_text,
+                    text_sha256=audio.text_sha256,
+                    config=audio.config,
+                    status="PENDING",
+                )
+            )
+        session.flush()
     return copied

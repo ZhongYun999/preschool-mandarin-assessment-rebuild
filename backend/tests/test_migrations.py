@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from test_paper import entries
-from test_publication import choose, registry, setup_paper
+from test_publication import TEST_AUDIO_CONFIG, choose, registry, setup_paper
 
 from app import import_batch, paper, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
@@ -40,7 +40,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             command.upgrade(config, "head")
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0005_publication_contract"
+                == "0006_fixed_audio"
             )
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
@@ -52,15 +52,16 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
                 "('guard_task_identity','guard_referenced_asset',"
                 "'lock_revision_assets','reject_revision_mutation',"
                 "'guard_paper_frozen','guard_paper_entry',"
-                "'guard_evaluation_plan','guard_publication_contract','guard_entry_plan_revision')"
+                "'guard_evaluation_plan','guard_publication_contract','guard_entry_plan_revision',"
+                "'guard_fixed_audio','guard_paper_audio_publication','guard_entry_audio_revision')"
             )
             assert connection.scalar(functions) == 0
             connection.commit()
             command.upgrade(config, "head")
-            assert connection.scalar(functions) == 9
+            assert connection.scalar(functions) == 12
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0005_publication_contract"
+                == "0006_fixed_audio"
             )
             connection.commit()
     finally:
@@ -100,7 +101,13 @@ def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
     choose(db, paper_id, reg)
     if scenario in {"published", "archived"}:
         with Session(db) as session, session.begin():
-            publish(session, paper_id=paper_id, expected_version=3, registry=reg)
+            publish(
+                session,
+                paper_id=paper_id,
+                expected_version=3,
+                registry=reg,
+                audio_config=TEST_AUDIO_CONFIG,
+            )
         if scenario == "archived":
             with db.begin() as connection:
                 connection.execute(
@@ -151,6 +158,5 @@ def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
         connection.rollback()
         assert [connection.execute(text(query)).all() for query in queries] == before
         assert (
-            connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0005_publication_contract"
+            connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006_fixed_audio"
         )
