@@ -18,6 +18,8 @@ from test_taskbank import CONTENT, write
 from app.fixed_audio import AudioData, AudioStore, FixedAudio, prepare_audio, readiness, text_hash
 from app.paper import Paper, PaperEntry, add_entry, copy_paper
 from app.publication import publish
+from app.tts_attempt import TTSAttempt
+from app.tts_worker import authorize_retry, run_audio
 
 
 def wav():
@@ -101,9 +103,9 @@ def test_failed_synthesis_recovers_and_partial_audio_not_ready(db, bank, tmp_pat
     paper_id, _, _, _, _ = published(db, bank)
     store, synth = AudioStore(tmp_path), Synth()
     synth.fail = True
-    assert set(prepare_audio(db, paper_id, store, synth).values()) == {"failed"}
+    assert set(prepare_audio(db, paper_id, store, synth).values()) == {"unknown"}
     with Session(db) as s:
-        assert all(r.error == "RuntimeError" for r in s.scalars(select(FixedAudio)))
+        assert all(r.error == "provider_unknown" for r in s.scalars(select(FixedAudio)))
         assert not readiness(s, paper_id, store).ready
     synth.fail = False
     # One request can succeed independently; the other requests still block readiness.
@@ -115,6 +117,9 @@ def test_failed_synthesis_recovers_and_partial_audio_not_ready(db, bank, tmp_pat
         row.media_type, row.status, row.error = "audio/wav", "READY", None
     with Session(db) as s:
         assert not readiness(s, paper_id, store).ready
+    with Session(db) as s, s.begin():
+        for row in s.scalars(select(FixedAudio).where(FixedAudio.status != "READY")):
+            authorize_retry(s, row.audio_id, accept_unknown=True)
     assert set(prepare_audio(db, paper_id, store, synth).values()) == {"ready"}
     with Session(db) as s:
         assert readiness(s, paper_id, store).ready
@@ -231,6 +236,7 @@ def test_dialogue_complete_prompt_is_passed_to_synthesizer(db, bank, tmp_path):
 def test_database_failure_after_file_write_does_not_commit_reference(db, bank, tmp_path):
     paper_id, *_ = published(db, bank)
     store = AudioStore(tmp_path)
+    synth = Synth()
 
     def fail_update(connection, cursor, statement, parameters, context, executemany):
         if statement.startswith("UPDATE fixed_audio_requests"):
@@ -239,7 +245,7 @@ def test_database_failure_after_file_write_does_not_commit_reference(db, bank, t
     event.listen(db, "before_cursor_execute", fail_update)
     try:
         with pytest.raises(RuntimeError, match="test database failure"):
-            prepare_audio(db, paper_id, store, Synth())
+            prepare_audio(db, paper_id, store, synth)
     finally:
         event.remove(db, "before_cursor_execute", fail_update)
     with Session(db) as s:
@@ -248,6 +254,12 @@ def test_database_failure_after_file_write_does_not_commit_reference(db, bank, t
             for row in s.scalars(select(FixedAudio))
         )
     assert any(item.is_file() for item in tmp_path.rglob("*"))
+    with Session(db) as s:
+        attempt = s.scalar(select(TTSAttempt))
+        assert attempt.state == "SAVED"
+        audio_id = attempt.audio_id
+    assert run_audio(db, audio_id, store, synth) == "ready"
+    assert len(synth.calls) == 1
 
 
 def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
@@ -271,7 +283,7 @@ def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0006_fixed_audio"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0007_tts_attempts"
         assert (
             c.scalar(
                 text("SELECT storage_ref FROM fixed_audio_requests WHERE audio_id=:id"),
@@ -314,5 +326,5 @@ def test_downgrade_refuses_copied_draft_audio_without_published_paper(db, bank):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0006_fixed_audio"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0007_tts_attempts"
         assert c.scalar(text("SELECT count(*) FROM fixed_audio_requests")) == 2

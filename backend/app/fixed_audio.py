@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, ForeignKey, Text, UniqueConstraint, Uuid, select, text
+from sqlalchemy import CheckConstraint, ForeignKey, Text, UniqueConstraint, Uuid, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -58,6 +58,18 @@ def text_hash(value: str) -> str:
 
 
 def validate_config(config: dict | None) -> dict:
+    def contains_secret(value):
+        if isinstance(value, dict):
+            return any(
+                str(key).lower().replace("-", "_")
+                in {"api_key", "apikey", "token", "secret", "password", "authorization"}
+                or contains_secret(item)
+                for key, item in value.items()
+            )
+        return isinstance(value, (list, tuple)) and any(contains_secret(item) for item in value)
+
+    if contains_secret(config):
+        raise ValueError("Credentials are not allowed in audio configuration")
     if (
         not isinstance(config, dict)
         or any(
@@ -225,65 +237,11 @@ def readiness(session: Session, paper_id: UUID, store: AudioStore) -> Readiness:
 def prepare_audio(
     engine: Engine, paper_id: UUID, store: AudioStore, synthesizer: Synthesizer
 ) -> dict[str, str]:
+    """Process published requests using the durable worker."""
+    from app.tts_worker import run_once
+
     with Session(engine) as session:
         paper = session.get(Paper, paper_id)
         if paper is None or paper.status != "PUBLISHED":
             raise ValueError("Paper is not published")
-        ids = list(
-            session.scalars(
-                select(FixedAudio.audio_id).join(PaperEntry).where(PaperEntry.paper_id == paper_id)
-            )
-        )
-    outcomes = {}
-    for audio_id in ids:
-        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as lock:
-            schema = lock.scalar(text("SELECT current_schema()"))
-            key = int.from_bytes(
-                hashlib.sha256(f"fixed-audio:{schema}:{audio_id}".encode()).digest()[:8],
-                "big",
-                signed=True,
-            )
-            if not lock.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}):
-                outcomes[str(audio_id)] = "busy"
-                continue
-            try:
-                with Session(engine) as session:
-                    row = session.get(FixedAudio, audio_id)
-                    if row.status == "READY":
-                        try:
-                            store.read(row.storage_ref, row.content_sha256)
-                            outcomes[str(audio_id)] = "ready"
-                        except (OSError, ValueError):
-                            outcomes[str(audio_id)] = "invalid_resource"
-                        continue
-                    source, config = row.source_text, dict(row.config)
-                try:
-                    result = synthesizer.synthesize(source, config)
-                    if (
-                        not isinstance(result.data, bytes)
-                        or not isinstance(result.media_type, str)
-                        or not result.media_type.startswith("audio/")
-                    ):
-                        raise ValueError("Invalid synthesizer output")
-                    ref, digest = store.put(result.data)
-                except Exception as exc:  # noqa: BLE001 - isolate provider and storage failures per request
-                    with Session(engine) as session, session.begin():
-                        row = session.get(FixedAudio, audio_id, with_for_update=True)
-                        if row.status != "READY":
-                            row.status, row.error = "FAILED", type(exc).__name__
-                    outcomes[str(audio_id)] = "failed"
-                    continue
-                with Session(engine) as session, session.begin():
-                    row = session.get(FixedAudio, audio_id, with_for_update=True)
-                    if row.status != "READY":
-                        (
-                            row.status,
-                            row.storage_ref,
-                            row.content_sha256,
-                            row.media_type,
-                            row.error,
-                        ) = "READY", ref, digest, result.media_type, None
-                outcomes[str(audio_id)] = "ready"
-            finally:
-                lock.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
-    return outcomes
+    return run_once(engine, store, synthesizer, paper_id)

@@ -17,8 +17,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import create_database_engine
+from app.fixed_audio import AudioStore, FixedAudio, readiness
 from app.import_batch import ImportBatch
 from app.import_preview_store import PreviewCorrupt, PreviewNotFound, PreviewStore
+from app.paper import Paper, PaperEntry
 from app.taskbank import Asset, TaskBank, TaskIdentity, TaskRevision
 from app.taskbank_excel import create_template
 from app.taskbank_import import (
@@ -31,6 +33,8 @@ from app.taskbank_import import (
 )
 from app.taskbank_storage import ImageStore
 from app.teacher_auth import require_teacher
+from app.tts_attempt import TTSAttempt
+from app.tts_worker import authorize_retry
 
 router = APIRouter(prefix="/teacher", dependencies=[Depends(require_teacher)])
 
@@ -60,6 +64,134 @@ def get_preview_store() -> PreviewStore:
 db_dependency = Depends(get_db)
 store_dependency = Depends(get_image_store)
 preview_store_dependency = Depends(get_preview_store)
+
+
+def get_audio_store() -> AudioStore:
+    load_dotenv()
+    return AudioStore()
+
+
+audio_store_dependency = Depends(get_audio_store)
+
+
+class AudioRetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    accept_unknown: bool = False
+
+
+def _paper_audio(session: Session, paper_id: UUID, audio_id: UUID | None = None):
+    paper = session.get(Paper, paper_id)
+    if paper is None:
+        raise HTTPException(status_code=404, detail="试卷不存在")
+    if audio_id is None:
+        return paper
+    audio = session.scalar(
+        select(FixedAudio)
+        .join(PaperEntry)
+        .where(PaperEntry.paper_id == paper_id, FixedAudio.audio_id == audio_id)
+    )
+    if audio is None:
+        raise HTTPException(status_code=404, detail="音频不存在")
+    return audio
+
+
+@router.get("/papers/{paper_id}/audio")
+def audio_status(
+    paper_id: UUID, session: Session = db_dependency, store: AudioStore = audio_store_dependency
+):
+    paper = _paper_audio(session, paper_id)
+    rows = session.scalars(
+        select(FixedAudio).join(PaperEntry).where(PaperEntry.paper_id == paper_id)
+    ).all()
+    items = []
+    for row in rows:
+        attempts = session.scalars(
+            select(TTSAttempt)
+            .where(TTSAttempt.audio_id == row.audio_id)
+            .order_by(TTSAttempt.created_at.desc(), TTSAttempt.attempt_id.desc())
+        ).all()
+        attempt = attempts[0] if attempts else None
+        diagnostic = None
+        if row.status == "READY":
+            try:
+                store.read(row.storage_ref, row.content_sha256)
+            except ValueError as exc:
+                diagnostic = (
+                    "file_missing" if str(exc) == "Audio file is missing" else "file_corrupt"
+                )
+            except OSError:
+                diagnostic = "file_unavailable"
+        items.append(
+            {
+                "audio_id": row.audio_id,
+                "paper_entry_id": row.paper_entry_id,
+                "role": row.role,
+                "status": row.status,
+                "attempt_state": attempt.state if attempt else None,
+                "error": attempt.error_category if attempt else row.error,
+                "retry_allowed": bool(
+                    attempt
+                    and attempt.state in {"FAILED", "UNKNOWN"}
+                    and not attempt.retry_authorized
+                ),
+                "retry_requires_acknowledgement": bool(attempt and attempt.state == "UNKNOWN"),
+                "diagnostic": diagnostic,
+                "attempts": [
+                    {
+                        "state": item.state,
+                        "error": item.error_category,
+                        "created_at": item.created_at,
+                    }
+                    for item in attempts
+                ],
+            }
+        )
+    result = readiness(session, paper_id, store)
+    return {
+        "paper_id": paper.paper_id,
+        "ready": result.ready,
+        "reasons": result.reasons,
+        "items": items,
+    }
+
+
+@router.post("/papers/{paper_id}/audio/prepare", status_code=202)
+def request_audio_preparation(paper_id: UUID, session: Session = db_dependency):
+    paper = _paper_audio(session, paper_id)
+    if paper.status != "PUBLISHED":
+        raise HTTPException(status_code=409, detail="试卷未发布")
+    return {"paper_id": paper_id, "message": "等待音频 Worker 扫描"}
+
+
+@router.post("/papers/{paper_id}/audio/{audio_id}/retry", status_code=202)
+def retry_audio(paper_id: UUID, audio_id: UUID, body: AudioRetry, session: Session = db_dependency):
+    paper = _paper_audio(session, paper_id)
+    _paper_audio(session, paper_id, audio_id)
+    if paper.status != "PUBLISHED":
+        raise HTTPException(status_code=409, detail="试卷未发布")
+    try:
+        authorize_retry(session, audio_id, accept_unknown=body.accept_unknown)
+        session.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"audio_id": audio_id, "message": "等待音频 Worker 重试"}
+
+
+@router.get("/papers/{paper_id}/audio/{audio_id}/content")
+def audio_content(
+    paper_id: UUID,
+    audio_id: UUID,
+    session: Session = db_dependency,
+    store: AudioStore = audio_store_dependency,
+):
+    row = _paper_audio(session, paper_id, audio_id)
+    if row.status != "READY":
+        raise HTTPException(status_code=409, detail="音频未就绪")
+    try:
+        data = store.read(row.storage_ref, row.content_sha256)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=409, detail="音频不可用") from None
+    return Response(content=data, media_type=row.media_type)
 
 
 class ImportConfirmation(BaseModel):

@@ -1,6 +1,6 @@
 from alembic import context
 
-from app import fixed_audio, import_batch, paper, taskbank  # noqa: F401  Registers mapped tables for Alembic.
+from app import fixed_audio, import_batch, paper, taskbank, tts_attempt  # noqa: F401
 from app.database import Base, create_database_engine
 
 config = context.config
