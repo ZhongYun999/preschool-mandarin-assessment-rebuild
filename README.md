@@ -79,4 +79,4 @@ PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 
 
 DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启动命令为 `python -m app.tts_worker`（从 `backend` 目录执行）。发布调用应显式冻结 `provider=dashscope`、模型、音色、`version=cosyvoice-sdk-v2`、语速、`format=wav` 和 `sample_rate`；可选地域和业务空间也必须由调用方明确提供。本阶段只支持 WAV，其他配置会明确拒绝，不会静默忽略。合成不会修改冻结的原文。
 
-教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 确认已由 Worker 扫描，`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。所有接口需要教师 Bearer 凭据。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
+教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 返回等待独立 Worker 扫描的提示；202 不表示已扫描、已开始生成或已立即排队。`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。所有接口需要教师 Bearer 凭据。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
