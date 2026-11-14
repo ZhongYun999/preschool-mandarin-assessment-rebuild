@@ -50,6 +50,7 @@ class Paper(Base):
 class PaperEntry(Base):
     __tablename__ = "paper_entries"
     __table_args__ = (
+        UniqueConstraint("paper_entry_id", "paper_id", name="uq_paper_entry_paper"),
         UniqueConstraint(
             "paper_id",
             "position",
