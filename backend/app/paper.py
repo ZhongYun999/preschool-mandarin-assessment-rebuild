@@ -18,6 +18,7 @@ from sqlalchemy import (
     func,
     select,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
@@ -63,6 +64,24 @@ class PaperEntry(Base):
         ForeignKey("task_revisions.task_revision_id"), nullable=False
     )
     position: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class EvaluationPlan(Base):
+    __tablename__ = "evaluation_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(requirements) = 'array'", name="ck_evaluation_requirements_array"
+        ),
+    )
+    paper_entry_id: Mapped[UUID] = mapped_column(
+        ForeignKey("paper_entries.paper_entry_id"), primary_key=True
+    )
+    task_revision_id: Mapped[UUID] = mapped_column(
+        ForeignKey("task_revisions.task_revision_id"), nullable=False
+    )
+    plugin_id: Mapped[str] = mapped_column(Text, nullable=False)
+    plugin_version: Mapped[str] = mapped_column(Text, nullable=False)
+    requirements: Mapped[list] = mapped_column(JSONB, nullable=False)
 
 
 class PaperEditConflict(ValueError):
@@ -164,7 +183,12 @@ def remove_entry(
     session: Session, *, paper_id: UUID, expected_version: int, entry_id: UUID
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
-    session.delete(_entry(session, paper_id, entry_id))
+    entry = _entry(session, paper_id, entry_id)
+    plan = session.get(EvaluationPlan, entry_id)
+    if plan is not None:
+        session.delete(plan)
+        session.flush()
+    session.delete(entry)
     paper.edit_version += 1
     session.flush()
 
@@ -174,6 +198,10 @@ def replace_entry(
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
     entry = _entry(session, paper_id, entry_id)
+    plan = session.get(EvaluationPlan, entry_id)
+    if plan is not None:
+        session.delete(plan)
+        session.flush()
     entry.task_revision_id = _latest(session, paper, task_id)
     paper.edit_version += 1
     session.flush()
@@ -223,14 +251,25 @@ def copy_paper(session: Session, *, source_id: UUID) -> Paper:
     entries = session.scalars(
         select(PaperEntry).where(PaperEntry.paper_id == source_id).order_by(PaperEntry.position)
     ).all()
-    session.add_all(
-        PaperEntry(
+    for e in entries:
+        new_entry = PaperEntry(
             paper_entry_id=uuid4(),
             paper_id=copied.paper_id,
             task_revision_id=e.task_revision_id,
             position=e.position,
         )
-        for e in entries
-    )
-    session.flush()
+        session.add(new_entry)
+        session.flush()
+        plan = session.get(EvaluationPlan, e.paper_entry_id)
+        if plan is not None:
+            session.add(
+                EvaluationPlan(
+                    paper_entry_id=new_entry.paper_entry_id,
+                    task_revision_id=plan.task_revision_id,
+                    plugin_id=plan.plugin_id,
+                    plugin_version=plan.plugin_version,
+                    requirements=plan.requirements,
+                )
+            )
+            session.flush()
     return copied

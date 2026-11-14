@@ -149,13 +149,28 @@ def test_published_facts_protected_from_sql_and_service(db, bank):
         ).paper_entry_id
     newer = write(db, bank, replace(CONTENT, prompt_text="更新版本"))
     with db.begin() as c:
+        c.execute(
+            text(
+                "UPDATE papers SET scoring_plugin_id='test', scoring_plugin_version='v1' WHERE paper_id=:id"
+            ),
+            {"id": paper_id},
+        )
+        c.execute(
+            text(
+                "INSERT INTO evaluation_plans (paper_entry_id, task_revision_id, plugin_id, plugin_version, requirements) VALUES (:entry, :revision, 'test', 'v1', '[]')"
+            ),
+            {"entry": entry_id, "revision": task.task_revision_id},
+        )
         c.execute(text("UPDATE papers SET status='PUBLISHED' WHERE paper_id=:id"), {"id": paper_id})
     statements = [
         ("UPDATE paper_entries SET position=2 WHERE paper_entry_id=:id", entry_id),
         ("UPDATE paper_entries SET task_revision_id=:revision WHERE paper_entry_id=:id", entry_id),
         ("DELETE FROM paper_entries WHERE paper_entry_id=:id", entry_id),
         ("UPDATE papers SET scoring_plugin_id='changed' WHERE paper_id=:id", paper_id),
-        ("UPDATE papers SET scoring_plugin_id='changed', scoring_plugin_version='v1' WHERE paper_id=:id", paper_id),
+        (
+            "UPDATE papers SET scoring_plugin_id='changed', scoring_plugin_version='v1' WHERE paper_id=:id",
+            paper_id,
+        ),
         ("UPDATE papers SET status='DRAFT' WHERE paper_id=:id", paper_id),
         ("DELETE FROM papers WHERE paper_id=:id", paper_id),
         ("INSERT INTO paper_entries VALUES (:newid, :id, :revision, 3)", paper_id),
