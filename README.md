@@ -72,3 +72,7 @@ python -m unittest discover -s scripts -p 'test_*.py'
 ## PR 检查
 
 PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 Markdown 修改不安装后端依赖；其他文件（包括依赖、迁移和 CI 配置）保守触发 Ruff、pytest 与 PostgreSQL 迁移检查。未来增加前端或其他模块时应扩展变更分类和对应任务；当前没有空任务。CI 不调用外部付费服务，也不运行全量端到端回归。
+
+## 固定语音存储
+
+固定语音对象默认保存在 Git 忽略的 `uploads/fixed-audio`，可通过 `FIXED_AUDIO_ROOT` 指定私有目录。发布时调用方必须显式提供供应商、模型、音色、版本和语速；本阶段没有生产 TTS 默认配置。服务只冻结请求，音频由后续注入的合成器准备；未生成或文件校验失败时不可用于新 Session。

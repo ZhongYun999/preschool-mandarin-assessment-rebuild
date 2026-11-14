@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from test_paper import draft, entries
 from test_taskbank import CONTENT, write
 
+from app.fixed_audio import AudioStore
 from app.paper import (
     EvaluationPlan,
     Paper,
@@ -27,6 +28,14 @@ from app.publication import (
     select_plugin,
 )
 from app.scoring_registry import EvaluationContract, Registry
+
+TEST_AUDIO_CONFIG = {
+    "provider": "test",
+    "model": "test",
+    "voice": "test",
+    "version": "1",
+    "speed": 1.0,
+}
 
 
 class TestPlugin:
@@ -119,7 +128,13 @@ def test_registry_selection_and_missing_plugin_or_contract_block(db, bank):
         assert not preflight_publication(s, paper_id, Registry()).valid
         assert not preflight_publication(s, paper_id, registry(contracts=False)).valid
     with pytest.raises(PublicationBlocked), Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=registry(contracts=False))
+        publish(
+            s,
+            paper_id=paper_id,
+            expected_version=3,
+            registry=registry(contracts=False),
+            audio_config=TEST_AUDIO_CONFIG,
+        )
     with Session(db) as s:
         assert s.get(Paper, paper_id).status == "DRAFT"
         assert s.scalars(select(EvaluationPlan)).all() == []
@@ -145,14 +160,18 @@ def test_preflight_readonly_freeze_and_audio_fields(db, bank):
             and s.scalars(select(EvaluationPlan)).all() == []
         )
     with Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=3, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
     with Session(db) as s:
-        assert not ready_for_new_session(s.get(Paper, paper_id))
+        assert not ready_for_new_session(s, paper_id, AudioStore())
         assert s.get(EvaluationPlan, a).requirements == result.entries[0].requirements
         assert s.get(EvaluationPlan, b).requirements == []
         assert entries(s, paper_id)[0].task_revision_id == task.task_revision_id
     with pytest.raises(ValueError, match="not a draft"), Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=4, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=4, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
 
 
 def test_copy_preserves_frozen_requirements_and_explicit_reselection(db, bank):
@@ -161,7 +180,9 @@ def test_copy_preserves_frozen_requirements_and_explicit_reselection(db, bank):
     reg = registry(original)
     choose(db, paper_id, reg)
     with Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=3, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
     newer = write(db, bank, replace(CONTENT, prompt_text="new"))
     original.evaluation_requirements = {"qa": (), "dialogue": ()}
     assert reg.requirements_for("test-only", "1", "qa")
@@ -197,7 +218,9 @@ def test_removing_another_papers_entry_does_not_remove_its_plan(db, bank):
     reg = registry()
     choose(db, paper_id, reg)
     with Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=3, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
     with Session(db) as s, s.begin():
         first = copy_paper(s, source_id=paper_id).paper_id
         second = copy_paper(s, source_id=paper_id).paper_id
@@ -222,7 +245,9 @@ def test_database_rejects_missing_plans_and_frozen_mutations(db, bank):
     with pytest.raises(DBAPIError), db.begin() as c:
         c.execute(text("UPDATE papers SET status='PUBLISHED' WHERE paper_id=:id"), {"id": paper_id})
     with Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=3, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
     for sql in (
         "UPDATE evaluation_plans SET requirements='[]' WHERE paper_entry_id=:id",
         "DELETE FROM evaluation_plans WHERE paper_entry_id=:id",
@@ -245,7 +270,9 @@ def test_explicit_plugin_change_revalidates_inherited_requirements(db, bank):
     )
     choose(db, paper_id, reg)
     with Session(db) as s, s.begin():
-        publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+        publish(
+            s, paper_id=paper_id, expected_version=3, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
     with Session(db) as s, s.begin():
         copy_id = copy_paper(s, source_id=paper_id).paper_id
     with Session(db) as s, s.begin():
@@ -262,7 +289,9 @@ def test_explicit_plugin_change_revalidates_inherited_requirements(db, bank):
         assert result.valid and all(entry.requirements == [] for entry in result.entries)
         assert all(s.get(EvaluationPlan, entry.entry_id) is None for entry in result.entries)
     with Session(db) as s, s.begin():
-        publish(s, paper_id=copy_id, expected_version=1, registry=reg)
+        publish(
+            s, paper_id=copy_id, expected_version=1, registry=reg, audio_config=TEST_AUDIO_CONFIG
+        )
 
 
 def test_disabled_plugin_cannot_be_newly_selected_but_history_can_be_read(db, bank):
@@ -309,7 +338,13 @@ def test_concurrent_publish_only_one_succeeds(db, bank):
         barrier.wait()
         try:
             with Session(db) as s, s.begin():
-                publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+                publish(
+                    s,
+                    paper_id=paper_id,
+                    expected_version=3,
+                    registry=reg,
+                    audio_config=TEST_AUDIO_CONFIG,
+                )
             return "ok"
         except ValueError:
             return "rejected"
@@ -353,7 +388,13 @@ def test_edit_and_publish_contend_and_no_partial_freeze(db, bank):
         try:
             with Session(db) as s, s.begin():
                 if kind == "publish":
-                    publish(s, paper_id=paper_id, expected_version=3, registry=reg)
+                    publish(
+                        s,
+                        paper_id=paper_id,
+                        expected_version=3,
+                        registry=reg,
+                        audio_config=TEST_AUDIO_CONFIG,
+                    )
                 else:
                     add_entry(
                         s, paper_id=paper_id, expected_version=3, task_id=task.task_id, position=3

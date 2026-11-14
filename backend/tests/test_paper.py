@@ -1,3 +1,5 @@
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -160,6 +162,27 @@ def test_published_facts_protected_from_sql_and_service(db, bank):
                 "INSERT INTO evaluation_plans (paper_entry_id, task_revision_id, plugin_id, plugin_version, requirements) VALUES (:entry, :revision, 'test', 'v1', '[]')"
             ),
             {"entry": entry_id, "revision": task.task_revision_id},
+        )
+        c.execute(
+            text(
+                "INSERT INTO fixed_audio_requests (audio_id, paper_entry_id, task_revision_id, role, source_text, text_sha256, config) VALUES (:audio, :entry, :rev, 'prompt', :source, :digest, CAST(:config AS jsonb))"
+            ),
+            {
+                "audio": uuid4(),
+                "entry": entry_id,
+                "rev": task.task_revision_id,
+                "source": CONTENT.prompt_text,
+                "digest": hashlib.sha256(CONTENT.prompt_text.encode()).hexdigest(),
+                "config": json.dumps(
+                    {
+                        "provider": "test",
+                        "model": "test",
+                        "voice": "test",
+                        "version": "1",
+                        "speed": 1,
+                    }
+                ),
+            },
         )
         c.execute(text("UPDATE papers SET status='PUBLISHED' WHERE paper_id=:id"), {"id": paper_id})
     statements = [
