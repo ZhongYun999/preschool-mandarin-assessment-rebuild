@@ -3,6 +3,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
 
@@ -291,7 +292,7 @@ def test_concurrent_create_and_redo(db, ready):
 
 def test_downgrade_rejects_existing_data(db, ready):
     created(db, ready)
-    config = Config("alembic.ini")
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as c:
         config.attributes["connection"] = c
         with pytest.raises(DBAPIError, match="must be preserved"):
