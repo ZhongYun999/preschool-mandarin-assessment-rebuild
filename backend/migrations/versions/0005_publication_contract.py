@@ -88,6 +88,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Serialize the check with writers so no frozen facts can appear before DDL.
+    op.execute("LOCK TABLE papers, paper_entries, evaluation_plans IN ACCESS EXCLUSIVE MODE")
+    op.execute("""DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM evaluation_plans)
+         OR EXISTS (SELECT 1 FROM papers WHERE status IN ('PUBLISHED', 'ARCHIVED')) THEN
+        RAISE EXCEPTION 'cannot downgrade: published papers or evaluation plans must be preserved';
+      END IF;
+    END $$""")
     op.execute("DROP TRIGGER entry_plan_revision_guard ON paper_entries")
     op.execute("DROP FUNCTION guard_entry_plan_revision()")
     op.execute("DROP TRIGGER publication_contract_guard ON papers")

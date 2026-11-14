@@ -10,9 +10,14 @@ from alembic.migration import MigrationContext
 from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
+from test_paper import entries
+from test_publication import choose, registry, setup_paper
 
 from app import import_batch, paper, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
+from app.paper import EvaluationPlan, copy_paper
+from app.publication import publish
 
 
 def test_postgres_connection_and_migration_cycle(monkeypatch):
@@ -85,4 +90,67 @@ def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
             == "0004_paper_drafts"
+        )
+
+
+@pytest.mark.parametrize("scenario", ["published", "archived", "copied_draft", "published_empty"])
+def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
+    paper_id, task, _, entry_id, _ = setup_paper(db, bank)
+    reg = registry()
+    choose(db, paper_id, reg)
+    if scenario in {"published", "archived"}:
+        with Session(db) as session, session.begin():
+            publish(session, paper_id=paper_id, expected_version=3, registry=reg)
+        if scenario == "archived":
+            with db.begin() as connection:
+                connection.execute(
+                    text("UPDATE papers SET status='ARCHIVED' WHERE paper_id=:id"), {"id": paper_id}
+                )
+    elif scenario == "copied_draft":
+        with Session(db) as session, session.begin():
+            session.add(
+                EvaluationPlan(
+                    paper_entry_id=entry_id,
+                    task_revision_id=task.task_revision_id,
+                    plugin_id="test-only",
+                    plugin_version="1",
+                    requirements=[
+                        {"source": "fake-llm", "version": "1", "parameters": {"mode": "qa"}}
+                    ],
+                )
+            )
+            session.flush()
+            copied_id = copy_paper(session, source_id=paper_id).paper_id
+            assert (
+                session.get(EvaluationPlan, entries(session, copied_id)[0].paper_entry_id)
+                is not None
+            )
+    else:
+        # A published paper without entries is legal, but must still block downgrade.
+        with db.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO papers (paper_id, bank_id, name, status, scoring_plugin_id, scoring_plugin_version) VALUES (:id, :bank, 'empty', 'PUBLISHED', 'test', '1')"
+                ),
+                {"id": uuid4(), "bank": bank},
+            )
+
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with db.connect() as connection:
+        config.attributes["connection"] = connection
+        queries = [
+            "SELECT * FROM papers ORDER BY paper_id",
+            "SELECT * FROM paper_entries ORDER BY paper_entry_id",
+            "SELECT * FROM evaluation_plans ORDER BY paper_entry_id",
+            "SELECT * FROM alembic_version",
+        ]
+        before = [connection.execute(text(query)).all() for query in queries]
+        connection.commit()
+        with pytest.raises(DBAPIError, match="must be preserved"):
+            command.downgrade(config, "0004_paper_drafts")
+        connection.rollback()
+        assert [connection.execute(text(query)).all() for query in queries] == before
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0005_publication_contract"
         )
