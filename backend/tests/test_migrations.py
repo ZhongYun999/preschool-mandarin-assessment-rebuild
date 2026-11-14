@@ -9,9 +9,15 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from dotenv import load_dotenv
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
+from test_paper import entries
+from test_publication import choose, registry, setup_paper
 
 from app import import_batch, paper, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
+from app.paper import EvaluationPlan, copy_paper
+from app.publication import publish
 
 
 def test_postgres_connection_and_migration_cycle(monkeypatch):
@@ -32,23 +38,119 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             connection.commit()
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_paper_drafts"
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0005_publication_contract"
+            )
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
             connection.commit()
             command.downgrade(config, "base")
-            functions = text("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
-                             "WHERE n.nspname=current_schema() AND p.proname IN "
-                             "('guard_task_identity','guard_referenced_asset',"
-                             "'lock_revision_assets','reject_revision_mutation',"
-                             "'guard_paper_frozen','guard_paper_entry')")
+            functions = text(
+                "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=current_schema() AND p.proname IN "
+                "('guard_task_identity','guard_referenced_asset',"
+                "'lock_revision_assets','reject_revision_mutation',"
+                "'guard_paper_frozen','guard_paper_entry',"
+                "'guard_evaluation_plan','guard_publication_contract','guard_entry_plan_revision')"
+            )
             assert connection.scalar(functions) == 0
             connection.commit()
             command.upgrade(config, "head")
-            assert connection.scalar(functions) == 6
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_paper_drafts"
+            assert connection.scalar(functions) == 9
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0005_publication_contract"
+            )
             connection.commit()
     finally:
         with engine.begin() as connection:
             connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         engine.dispose()
+
+
+def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with db.connect() as connection:
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0004_paper_drafts")
+        connection.commit()
+        paper_id = uuid4()
+        connection.execute(
+            text("INSERT INTO papers (paper_id, bank_id, name) VALUES (:id, :bank, 'legacy')"),
+            {"id": paper_id, "bank": bank},
+        )
+        connection.execute(
+            text("UPDATE papers SET status='PUBLISHED' WHERE paper_id=:id"), {"id": paper_id}
+        )
+        connection.commit()
+        with pytest.raises(DBAPIError, match="explicit reconciliation"):
+            command.upgrade(config, "head")
+        connection.rollback()
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0004_paper_drafts"
+        )
+
+
+@pytest.mark.parametrize("scenario", ["published", "archived", "copied_draft", "published_empty"])
+def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
+    paper_id, task, _, entry_id, _ = setup_paper(db, bank)
+    reg = registry()
+    choose(db, paper_id, reg)
+    if scenario in {"published", "archived"}:
+        with Session(db) as session, session.begin():
+            publish(session, paper_id=paper_id, expected_version=3, registry=reg)
+        if scenario == "archived":
+            with db.begin() as connection:
+                connection.execute(
+                    text("UPDATE papers SET status='ARCHIVED' WHERE paper_id=:id"), {"id": paper_id}
+                )
+    elif scenario == "copied_draft":
+        with Session(db) as session, session.begin():
+            session.add(
+                EvaluationPlan(
+                    paper_entry_id=entry_id,
+                    task_revision_id=task.task_revision_id,
+                    plugin_id="test-only",
+                    plugin_version="1",
+                    requirements=[
+                        {"source": "fake-llm", "version": "1", "parameters": {"mode": "qa"}}
+                    ],
+                )
+            )
+            session.flush()
+            copied_id = copy_paper(session, source_id=paper_id).paper_id
+            assert (
+                session.get(EvaluationPlan, entries(session, copied_id)[0].paper_entry_id)
+                is not None
+            )
+    else:
+        # A published paper without entries is legal, but must still block downgrade.
+        with db.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO papers (paper_id, bank_id, name, status, scoring_plugin_id, scoring_plugin_version) VALUES (:id, :bank, 'empty', 'PUBLISHED', 'test', '1')"
+                ),
+                {"id": uuid4(), "bank": bank},
+            )
+
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with db.connect() as connection:
+        config.attributes["connection"] = connection
+        queries = [
+            "SELECT * FROM papers ORDER BY paper_id",
+            "SELECT * FROM paper_entries ORDER BY paper_entry_id",
+            "SELECT * FROM evaluation_plans ORDER BY paper_entry_id",
+            "SELECT * FROM alembic_version",
+        ]
+        before = [connection.execute(text(query)).all() for query in queries]
+        connection.commit()
+        with pytest.raises(DBAPIError, match="must be preserved"):
+            command.downgrade(config, "0004_paper_drafts")
+        connection.rollback()
+        assert [connection.execute(text(query)).all() for query in queries] == before
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0005_publication_contract"
+        )
