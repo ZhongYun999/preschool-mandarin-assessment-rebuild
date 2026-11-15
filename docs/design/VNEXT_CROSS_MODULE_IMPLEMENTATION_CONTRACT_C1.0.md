@@ -39,6 +39,8 @@
 
 **T2｜整题重做【确定】**：仅当 Session=`IN_PROGRESS` 且当前操作无冲突时，原子地使旧 Attempt 退出候选、创建新的 OPEN Attempt，并更新唯一当前指针。旧已 SEALED Submission 保留历史，但不可兜底。与整场关闭的事务必须通过同一权威 Session/SessionTask 行锁或条件更新串行裁决。
 
+显式整题重做无需等待旧 Attempt 的播放结束：旧 Attempt 被放弃，其未完成播放不再具备当前业务资格；同一 Attempt 内的播放与提交冲突规则仍然有效。
+
 **T3｜Submission 正式接受【确定】**：题型 Handler 验证阶段与已保存事实；同一事务固定输入清单、唯一 Submission、`OPEN→SEALED` 和后台可见的持久处理意图。失败不出现“SEALED 无 Submission”或“Worker 已领取半成品”。耗时外部调用必须在事务之外。`submit_request_id` 重传幂等；成功后儿童立即可以进行下一题。
 
 **T4｜结束整场【确定】**：锁定/条件更新 Session，逐题读取**当前**已 SEALED Attempt 的唯一合法 Submission；原子保存 `CloseManifest` + `IN_PROGRESS→INPUT_CLOSED` + 后续处理意图。若 B 重做后未提交，则明确报告该题未完成，整个事务不关闭。`close_request_id` 重传返回同一个结果；关闭后不可撤回或新建 Attempt。
