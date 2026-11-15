@@ -59,6 +59,7 @@ class SessionTask(Base):
     __tablename__ = "session_tasks"
     __table_args__ = (
         UniqueConstraint("session_id", "paper_entry_id", name="uq_session_task_entry"),
+        UniqueConstraint("session_task_id", "session_id", name="uq_session_task_session"),
         ForeignKeyConstraint(
             ["session_id", "paper_id"],
             ["assessment_sessions.session_id", "assessment_sessions.paper_id"],
@@ -213,7 +214,9 @@ def ordered_tasks(session: Session, session_id: UUID) -> list[SessionTask]:
     )
 
 
-def _lock_task(session: Session, session_id: UUID, task_id: UUID) -> SessionTask:
+def _lock_task(
+    session: Session, session_id: UUID, task_id: UUID, *, allow_closed: bool = False
+) -> SessionTask:
     _transaction(session)
     owner = session.scalar(
         select(AssessmentSession)
@@ -221,7 +224,7 @@ def _lock_task(session: Session, session_id: UUID, task_id: UUID) -> SessionTask
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if owner is None or owner.status != "IN_PROGRESS":
+    if owner is None or (not allow_closed and owner.status != "IN_PROGRESS"):
         raise ValueError("Session is not in progress")
     task = session.scalar(
         select(SessionTask)
