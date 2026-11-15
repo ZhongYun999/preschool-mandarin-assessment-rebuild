@@ -77,6 +77,13 @@ class EvaluationIntent(Base):
     __tablename__ = "evaluation_intents"
     __table_args__ = (
         UniqueConstraint("submission_id", "requirement_index", name="uq_intent_requirement"),
+        UniqueConstraint(
+            "intent_id",
+            "submission_id",
+            "paper_entry_id",
+            "requirement_index",
+            name="uq_intent_identity",
+        ),
     )
     intent_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     submission_id: Mapped[UUID] = mapped_column(
