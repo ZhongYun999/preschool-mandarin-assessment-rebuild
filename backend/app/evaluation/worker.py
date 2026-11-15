@@ -15,7 +15,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.papers.paper import EvaluationPlan, PaperEntry
 from app.scoring.registry import Registry
-from app.sessions.assessment_session import SessionTask
+from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
+from app.sessions.close_manifest import CloseManifest, CloseManifestEntry
 from app.sessions.submission import EvaluationIntent, Submission
 from app.taskbank.models import TaskRevision
 
@@ -75,13 +76,16 @@ def _json(value: Any) -> str:
     )
 
 
-def schedule(session: Session) -> int:
+def schedule(session: Session, *, limit: int | None = None) -> int:
     """Create at most one job per genuine, frozen intent in the caller transaction."""
     rows = session.execute(
         select(EvaluationIntent, Submission, SessionTask, EvaluationPlan)
         .join(Submission, Submission.submission_id == EvaluationIntent.submission_id)
         .join(SessionTask, SessionTask.session_task_id == Submission.session_task_id)
         .join(EvaluationPlan, EvaluationPlan.paper_entry_id == EvaluationIntent.paper_entry_id)
+        .where(EvaluationIntent.scheduled_at.is_(None))
+        .order_by(EvaluationIntent.intent_id)
+        .limit(limit)
     ).all()
     count = 0
     for intent, submission, task, plan in rows:
@@ -116,7 +120,86 @@ def schedule(session: Session) -> int:
             .returning(EvaluationJob.job_id)
         )
         count += created is not None
+        session.execute(
+            update(EvaluationIntent)
+            .where(
+                EvaluationIntent.intent_id == intent.intent_id,
+                EvaluationIntent.scheduled_at.is_(None),
+            )
+            .values(scheduled_at=func.clock_timestamp())
+            .execution_options(synchronize_session=False)
+        )
+        # The conditional update can lose to another dispatcher. Refresh on
+        # subsequent ORM reads instead of exposing a stale pending marker.
+        session.expire(intent, ["scheduled_at"])
     return count
+
+
+def _lock_job_context(session: Session, job_id: UUID):
+    """Use the Session → SessionTask → Attempt → Job order used by redo and close."""
+    identity = session.execute(
+        select(
+            Submission.submission_id,
+            Submission.session_task_id,
+            Submission.attempt_id,
+            SessionTask.session_id,
+        )
+        .join(EvaluationJob, EvaluationJob.submission_id == Submission.submission_id)
+        .join(SessionTask, SessionTask.session_task_id == Submission.session_task_id)
+        .where(EvaluationJob.job_id == job_id)
+    ).one_or_none()
+    if identity is None:
+        return None
+    submission_id, task_id, attempt_id, session_id = identity
+    owner = session.scalar(
+        select(AssessmentSession)
+        .where(AssessmentSession.session_id == session_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    task = session.scalar(
+        select(SessionTask)
+        .where(SessionTask.session_task_id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    attempt = session.scalar(
+        select(Attempt)
+        .where(Attempt.attempt_id == attempt_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    job = session.scalar(
+        select(EvaluationJob)
+        .where(EvaluationJob.job_id == job_id)
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    if job is None:
+        return None
+    if owner.status == "IN_PROGRESS":
+        current = task.current_attempt_id == attempt_id and attempt.status == "SEALED"
+    elif owner.status in ("INPUT_CLOSED", "COMPLETED"):
+        current = (
+            session.scalar(
+                select(CloseManifestEntry.submission_id)
+                .join(CloseManifest, CloseManifest.manifest_id == CloseManifestEntry.manifest_id)
+                .where(
+                    CloseManifest.session_id == session_id,
+                    CloseManifestEntry.session_task_id == task_id,
+                    CloseManifestEntry.submission_id == submission_id,
+                )
+            )
+            is not None
+        )
+    else:
+        current = False
+    return job, session.get(Submission, submission_id), current
+
+
+def _skip(job: EvaluationJob) -> None:
+    job.status, job.error_code = "SKIPPED", "SUPERSEDED"
+    job.claim_token, job.lease_until = None, None
 
 
 def claim_job(
@@ -130,15 +213,17 @@ def claim_job(
     if not isinstance(lease, timedelta) or lease <= timedelta(0):
         raise ValueError("Lease must be positive")
     with Session(engine) as s, s.begin():
-        job = s.scalar(
-            select(EvaluationJob)
-            .where(EvaluationJob.job_id == job_id)
-            .with_for_update(skip_locked=True)
-            .execution_options(populate_existing=True)
-        )
-        if job is None or job.status != "WAITING":
+        context = _lock_job_context(s, job_id)
+        if context is None:
             return None
-        submission = s.get(Submission, job.submission_id)
+        job, submission, current = context
+        if job.status != "WAITING":
+            return None
+        if not current:
+            _skip(job)
+            s.flush()
+            return None
+        job.last_checked_at = s.scalar(select(func.clock_timestamp()))
         entry = s.get(PaperEntry, job.paper_entry_id)
         revision = s.get(TaskRevision, entry.task_revision_id)
         adapter = adapters.get((job.requirement["source"], job.requirement["version"]))
@@ -173,6 +258,7 @@ def claim_job(
         token = uuid4()
         job.input_refs, job.input_fingerprint = refs, digest
         job.claim_token, job.lease_until = token, now + lease
+        job.dispatch_started_at = None
         job.status, job.error_code = "RUNNING", None
         job.attempts += 1
         s.flush()
@@ -225,17 +311,23 @@ def _finish(
 
 
 def execute_claim(engine: Engine, claim: Claim) -> bool:
-    """Invoke outside any DB transaction; unexpected external outcomes remain unknown."""
-    with Session(engine) as s:
-        live = s.scalar(
-            select(EvaluationJob).where(
-                EvaluationJob.job_id == claim.job_id,
-                EvaluationJob.status == "RUNNING",
-                EvaluationJob.claim_token == claim.token,
-                EvaluationJob.lease_until > func.clock_timestamp(),
-            )
-        )
-        if live is None:
+    """Mark dispatch under the session lock, then call the adapter without a DB transaction."""
+    with Session(engine) as s, s.begin():
+        context = _lock_job_context(s, claim.job_id)
+        if context is None:
+            return False
+        live, _, current = context
+        now = s.scalar(select(func.clock_timestamp()))
+        if (
+            live.status != "RUNNING"
+            or live.claim_token != claim.token
+            or live.lease_until <= now
+            or live.dispatch_started_at is not None
+        ):
+            return False
+        if not current:
+            _skip(live)
+            s.flush()
             return False
         fingerprint = hashlib.sha256(
             _json(
@@ -252,6 +344,10 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
             or live.input_fingerprint != fingerprint
         ):
             raise ValueError("Claim does not match frozen input identity")
+        # The committed marker is the dispatch boundary. Redo after it may race
+        # an external request; a crash is conservatively treated as UNKNOWN.
+        live.dispatch_started_at = now
+        s.flush()
     inputs = InputSnapshot(
         json.loads(_json(claim.inputs.refs)), json.loads(_json(claim.inputs.payload))
     )
@@ -296,17 +392,23 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
     return _finish(engine, claim, status="READY", result=result)
 
 
-def recover_expired(session: Session) -> int:
-    """An expired execution may already have called an external provider."""
+def recover_expired(session: Session, *, limit: int | None = None) -> int:
+    """Requeue undispatched leases; preserve ambiguous external outcomes as UNKNOWN."""
     jobs = session.scalars(
         select(EvaluationJob)
         .where(
             EvaluationJob.status == "RUNNING", EvaluationJob.lease_until <= func.clock_timestamp()
         )
+        .order_by(EvaluationJob.lease_until, EvaluationJob.job_id)
+        .limit(limit)
         .with_for_update(skip_locked=True)
         .execution_options(populate_existing=True)
     ).all()
     for job in jobs:
+        if job.dispatch_started_at is None:
+            job.status, job.error_code = "WAITING", None
+            job.claim_token, job.lease_until = None, None
+            continue
         session.add(
             RawEvaluation(
                 evaluation_id=uuid4(),
@@ -338,3 +440,38 @@ def authorize_retry(session: Session, job_id: UUID, *, accept_unknown: bool = Fa
         raise ValueError("Unknown external outcome requires explicit acknowledgment")
     job.status, job.error_code = "WAITING", None
     session.flush()
+
+
+def run_once(
+    engine: Engine,
+    *,
+    registry: Registry,
+    adapters: Mapping[tuple[str, str], Adapter],
+    lease: timedelta,
+    batch_size: int,
+) -> dict[str, int]:
+    """Scan bounded persistent batches; no in-memory queue survives a call."""
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+        raise ValueError("Batch size must be positive")
+    with Session(engine) as s, s.begin():
+        scheduled = schedule(s, limit=batch_size)
+        recovered = recover_expired(s, limit=batch_size)
+    with Session(engine) as s:
+        ids = s.scalars(
+            select(EvaluationJob.job_id)
+            .where(EvaluationJob.status == "WAITING")
+            .order_by(EvaluationJob.last_checked_at, EvaluationJob.job_id)
+            .limit(batch_size)
+        ).all()
+    claimed = finished = 0
+    for job_id in ids:
+        work = claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+        if work is not None:
+            claimed += 1
+            finished += int(execute_claim(engine, work))
+    return {
+        "scheduled": scheduled,
+        "recovered": recovered,
+        "claimed": claimed,
+        "finished": finished,
+    }

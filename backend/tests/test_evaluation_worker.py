@@ -329,26 +329,44 @@ def test_schedule_rollback_and_unknown_failure(db, context):
 
 def test_old_results_stay_with_original_submission_after_redo_and_close(db, context):
     old_submission, old_job = prepare(db, context)
-    with Session(db) as s, s.begin():
-        new_attempt = redo_attempt(
-            s,
-            session_id=context["session_id"],
-            session_task_id=context["session_task_id"],
-            redo_request_id="redo",
-        ).attempt_id
-    newer = dict(context, attempt_id=new_attempt)
-    deliver(db, newer)
-    with Session(db) as s, s.begin():
-        new_submission = submit(s, newer, request="new").submission_id
-        assert schedule(s) == 1
-        manifest_id = close_session(
-            s, session_id=context["session_id"], close_request_id="close"
-        ).manifest_id
-        new_job = s.scalar(
-            select(EvaluationJob.job_id).where(EvaluationJob.submission_id == new_submission)
-        )
-    assert execute_claim(db, claim(db, new_job, FakeAdapter()))
-    assert execute_claim(db, claim(db, old_job, FakeAdapter()))
+    entered, release = Event(), Event()
+
+    class StartedAdapter(FakeAdapter):
+        def evaluate(self, inputs, requirement):
+            entered.set()
+            assert release.wait(10)
+            return super().evaluate(inputs, requirement)
+
+    # The old call has already crossed the dispatch boundary before redo.
+    old_claim = claim(db, old_job, StartedAdapter())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(execute_claim, db, old_claim)
+        try:
+            assert entered.wait(10)
+            with Session(db) as s, s.begin():
+                new_attempt = redo_attempt(
+                    s,
+                    session_id=context["session_id"],
+                    session_task_id=context["session_task_id"],
+                    redo_request_id="redo",
+                ).attempt_id
+            newer = dict(context, attempt_id=new_attempt)
+            deliver(db, newer)
+            with Session(db) as s, s.begin():
+                new_submission = submit(s, newer, request="new").submission_id
+                assert schedule(s) == 1
+                manifest_id = close_session(
+                    s, session_id=context["session_id"], close_request_id="close"
+                ).manifest_id
+                new_job = s.scalar(
+                    select(EvaluationJob.job_id).where(
+                        EvaluationJob.submission_id == new_submission
+                    )
+                )
+            assert execute_claim(db, claim(db, new_job, FakeAdapter()))
+        finally:
+            release.set()
+        assert future.result(timeout=10)
     with Session(db) as s:
         assert [e.submission_id for e in manifest_entries(s, manifest_id)] == [new_submission]
         assert (
@@ -372,7 +390,7 @@ def test_downgrade_refuses_existing_evidence(db, context):
             command.downgrade(config, "0011_session_task_identity")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM raw_evaluations")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0012_evaluation_jobs"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0013_eval_dispatcher"
 
 
 def test_retry_rejects_changed_resolved_input_identity(db, context):
