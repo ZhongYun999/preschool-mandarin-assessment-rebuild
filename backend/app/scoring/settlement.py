@@ -17,6 +17,8 @@ from app.scoring.models import (
     AutomaticTaskScore,
     FinalScoreResult,
     PendingReview,
+    ReviewDecision,
+    ReviewedPaperScore,
 )
 from app.scoring.registry import PRODUCTION_REGISTRY, Registry
 from app.sessions.assessment_session import AssessmentSession, SessionTask, _transaction
@@ -93,6 +95,7 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
         raise ValueError("Frozen scoring plugin version is unavailable")
     scores = []
     review_tasks = []
+    review_unknown = False
     incomplete = False
     for item in manifest_entries(db, manifest.manifest_id):
         task = db.get(SessionTask, item.session_task_id)
@@ -113,11 +116,15 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
         if evidence is None:
             incomplete = True
             continue
-        if any(
-            isinstance(raw.payload, dict) and raw.payload.get("review_recommended") is True
-            for raw in evidence
-        ):
-            review_tasks.append(task.session_task_id)
+        for raw, requirement in zip(evidence, plan.requirements, strict=True):
+            if not isinstance(raw.payload, dict):
+                review_unknown = True
+                continue
+            recommendation = registry.review_recommendation(requirement, raw.payload)
+            if recommendation is None:
+                review_unknown = True
+            elif recommendation:
+                review_tasks.append(task.session_task_id)
         score = db.scalar(
             select(AutomaticTaskScore).where(
                 AutomaticTaskScore.manifest_id == manifest.manifest_id,
@@ -200,7 +207,7 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
         )
         db.add(paper_score)
         db.flush()
-    for task_id in review_tasks:
+    for task_id in set(review_tasks):
         if (
             db.scalar(
                 select(PendingReview).where(
@@ -218,21 +225,53 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
                     reason="MODEL_RECOMMENDED",
                 )
             )
+    # Earlier versions could persist a recommendation without source semantics.
+    # Preserve such facts, but do not silently treat them as resolved or discard them.
+    db.flush()
+    recorded_review_tasks = set(
+        db.scalars(
+            select(PendingReview.session_task_id).where(
+                PendingReview.manifest_id == manifest.manifest_id
+            )
+        )
+    )
+    if recorded_review_tasks - set(review_tasks):
+        review_unknown = True
     # No general sampling interpreter exists yet. Recognize only the entire,
     # explicit zero-sampling snapshot, not arbitrary policy with a zero field.
     if (
-        review_tasks
+        review_unknown
         or set(owner.review_policy) != {"sampling"}
         or type(owner.review_policy["sampling"]) not in (int, float)
         or owner.review_policy["sampling"] != 0
     ):
         db.flush()
         return None
+    reviewed_score = None
+    if review_tasks:
+        decisions = list(
+            db.scalars(
+                select(ReviewDecision)
+                .where(ReviewDecision.manifest_id == manifest.manifest_id)
+                .order_by(ReviewDecision.revision.desc())
+            )
+        )
+        if not set(review_tasks).issubset({d.session_task_id for d in decisions}):
+            return None
+        reviewed_score = db.scalar(
+            select(ReviewedPaperScore).where(
+                ReviewedPaperScore.manifest_id == manifest.manifest_id,
+                ReviewedPaperScore.revision == decisions[0].revision,
+            )
+        )
+        if reviewed_score is None:
+            raise ValueError("Latest review has no paper score snapshot")
     result = FinalScoreResult(
         result_id=uuid4(),
         session_id=session_id,
         manifest_id=manifest.manifest_id,
         paper_score_id=paper_score.score_id,
+        reviewed_paper_score_id=reviewed_score.score_id if reviewed_score else None,
     )
     db.add(result)
     owner.status = "COMPLETED"

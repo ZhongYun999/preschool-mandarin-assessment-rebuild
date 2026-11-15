@@ -25,6 +25,7 @@ class EvaluationContract:
     version: str
     task_types: frozenset[str]
     validate_parameters: Callable[[Mapping[str, Any]], bool]
+    review_recommendation: Callable[[Mapping[str, Any]], bool] | None = None
 
 
 class Registry:
@@ -76,6 +77,19 @@ class Registry:
             and task_type in contract.task_types
             and contract.validate_parameters(params)
         )
+
+    def review_recommendation(
+        self, requirement: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> bool | None:
+        contract = self._contracts.get((requirement["source"], requirement["version"]))
+        if contract is None:
+            return None
+        if contract.review_recommendation is None:
+            return None
+        result = contract.review_recommendation(payload)
+        if type(result) is not bool:
+            raise ValueError("Review recommendation contract must return a boolean")
+        return result
 
 
 PRODUCTION_REGISTRY = Registry()
