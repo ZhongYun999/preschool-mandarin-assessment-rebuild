@@ -1,6 +1,7 @@
 from alembic import context
 
 from app.database import Base, create_database_engine
+from app.evaluation import models as evaluation_models  # noqa: F401
 from app.media import fixed_audio, tts_attempt  # noqa: F401
 from app.papers import paper  # noqa: F401
 from app.sessions import assessment_session, close_manifest, submission  # noqa: F401

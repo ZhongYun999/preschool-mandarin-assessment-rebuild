@@ -39,7 +39,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             command.upgrade(config, "head")
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0011_session_task_identity"
+                == "0012_evaluation_jobs"
             )
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
@@ -60,7 +60,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             assert connection.scalar(functions) == 12
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0011_session_task_identity"
+                == "0012_evaluation_jobs"
             )
             connection.commit()
     finally:
@@ -158,5 +158,5 @@ def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
         assert [connection.execute(text(query)).all() for query in queries] == before
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0011_session_task_identity"
+            == "0012_evaluation_jobs"
         )
