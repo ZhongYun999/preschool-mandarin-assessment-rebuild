@@ -193,8 +193,15 @@ def test_attempt_restore_redo_sealed_and_rollback(db, ready):
             ).attempt_id
             == b
         )
-    # Test-only historical precondition; production cannot seal without Submission.
+    # Test-only historical fixture: sealing and its submission are committed together.
     with db.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO submissions (submission_id, attempt_id, session_task_id, submit_request_id, inputs) "
+                "VALUES (:id, :attempt, :task, 'fixture', '{}'::jsonb)"
+            ),
+            {"id": uuid4(), "attempt": b, "task": task_id},
+        )
         c.execute(text("UPDATE attempts SET status='SEALED' WHERE attempt_id=:id"), {"id": b})
     with Session(db) as s, s.begin():
         c_id = redo_attempt(
@@ -299,9 +306,7 @@ def test_downgrade_rejects_existing_data(db, ready):
             command.downgrade(config, "0007_tts_attempts")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM assessment_sessions")) == 1
-        assert (
-            c.scalar(text("SELECT version_num FROM alembic_version")) == "0008_session_foundation"
-        )
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0009_submission"
 
 
 def test_concurrent_start_and_same_redo_are_idempotent(db, ready):
