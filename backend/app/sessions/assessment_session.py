@@ -25,10 +25,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
-from app.fixed_audio import AudioStore, readiness
-from app.paper import EvaluationPlan, Paper, PaperEntry
-from app.scoring_registry import PRODUCTION_REGISTRY, Registry
-from app.taskbank import TaskRevision
+from app.media.fixed_audio import AudioStore, readiness
+from app.papers.paper import EvaluationPlan, Paper, PaperEntry
+from app.scoring.registry import PRODUCTION_REGISTRY, Registry
+from app.taskbank.models import TaskRevision
 
 
 class AssessmentSession(Base):

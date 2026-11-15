@@ -14,8 +14,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
-from app.paper import EvaluationPlan, Paper, PaperEntry
-from app.taskbank import TaskRevision
+from app.papers.paper import EvaluationPlan, Paper, PaperEntry
+from app.taskbank.models import TaskRevision
 
 
 class FixedAudio(Base):
@@ -105,7 +105,7 @@ class AudioStore:
             else Path(
                 os.environ.get(
                     "FIXED_AUDIO_ROOT",
-                    Path(__file__).resolve().parents[2] / "uploads" / "fixed-audio",
+                    Path(__file__).resolve().parents[3] / "uploads" / "fixed-audio",
                 )
             )
         )
@@ -238,7 +238,7 @@ def prepare_audio(
     engine: Engine, paper_id: UUID, store: AudioStore, synthesizer: Synthesizer
 ) -> dict[str, str]:
     """Process published requests using the durable worker."""
-    from app.tts_worker import run_once
+    from app.media.tts_worker import run_once
 
     with Session(engine) as session:
         paper = session.get(Paper, paper_id)

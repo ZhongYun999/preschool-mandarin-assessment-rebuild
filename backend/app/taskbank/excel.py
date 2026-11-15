@@ -15,7 +15,7 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from PIL import Image as PillowImage
 
-from app.taskbank import RevisionContent
+from app.taskbank.models import RevisionContent
 
 SHEET = "题库导入"
 HEADERS = (

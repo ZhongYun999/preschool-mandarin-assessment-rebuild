@@ -8,10 +8,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.fixed_audio import AudioStore, FixedAudio, readiness, text_hash, validate_config
-from app.paper import EvaluationPlan, Paper, PaperEntry, _lock_draft
-from app.scoring_registry import PRODUCTION_REGISTRY, Registry
-from app.taskbank import TaskIdentity, TaskRevision
+from app.media.fixed_audio import AudioStore, FixedAudio, readiness, text_hash, validate_config
+from app.papers.paper import EvaluationPlan, Paper, PaperEntry, _lock_draft
+from app.scoring.registry import PRODUCTION_REGISTRY, Registry
+from app.taskbank.models import TaskIdentity, TaskRevision
 
 
 @dataclass(frozen=True)

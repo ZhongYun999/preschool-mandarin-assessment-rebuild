@@ -9,7 +9,7 @@ from openpyxl.drawing.spreadsheet_drawing import AbsoluteAnchor, AnchorMarker, T
 from openpyxl.drawing.xdr import XDRPoint2D, XDRPositiveSize2D
 from PIL import Image as PillowImage
 
-from app.taskbank_excel import HEADERS, create_template, preflight_xlsx
+from app.taskbank.excel import HEADERS, create_template, preflight_xlsx
 
 
 def image_bytes(color):

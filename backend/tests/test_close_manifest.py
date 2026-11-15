@@ -19,7 +19,11 @@ from test_publication import TEST_AUDIO_CONFIG, TestPlugin
 from test_submission import deliver, start, submit
 from test_taskbank import CONTENT, write
 
-from app.assessment_session import (
+from app.media.fixed_audio import AudioStore, prepare_audio
+from app.papers.paper import add_entry
+from app.papers.publication import publish, select_plugin
+from app.scoring.registry import Registry
+from app.sessions.assessment_session import (
     AssessmentSession,
     Attempt,
     SessionTask,
@@ -28,7 +32,7 @@ from app.assessment_session import (
     redo_attempt,
     start_attempt,
 )
-from app.close_manifest import (
+from app.sessions.close_manifest import (
     CloseManifest,
     CloseManifestEntry,
     IncompleteSession,
@@ -37,11 +41,7 @@ from app.close_manifest import (
     close_session,
     manifest_entries,
 )
-from app.fixed_audio import AudioStore, prepare_audio
-from app.paper import add_entry
-from app.publication import publish, select_plugin
-from app.scoring_registry import Registry
-from app.submission import Submission
+from app.sessions.submission import Submission
 
 pytest_plugins = ("test_submission",)
 

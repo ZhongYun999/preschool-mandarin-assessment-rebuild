@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from app.taskbank_excel import ImageData
+from app.taskbank.excel import ImageData
 
 
 class ImageStore:
@@ -13,7 +13,7 @@ class ImageStore:
         self.root = (
             Path(root)
             if root is not None
-            else Path(__file__).resolve().parents[2] / "uploads" / "taskbank"
+            else Path(__file__).resolve().parents[3] / "uploads" / "taskbank"
         )
 
     def verify(self, ref: str, image: ImageData) -> None:

@@ -8,10 +8,10 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.dashscope_tts import DashScopeSynthesizer, TTSError
-from app.fixed_audio import AudioStore, FixedAudio
-from app.paper import Paper, PaperEntry
-from app.tts_attempt import TTSAttempt
+from app.media.dashscope_tts import DashScopeSynthesizer, TTSError
+from app.media.fixed_audio import AudioStore, FixedAudio
+from app.media.tts_attempt import TTSAttempt
+from app.papers.paper import Paper, PaperEntry
 
 
 def _latest(session, audio_id):

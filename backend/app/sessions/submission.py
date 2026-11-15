@@ -20,11 +20,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from app.assessment_session import AssessmentSession, Attempt, _identity, _lock_task
 from app.database import Base
-from app.fixed_audio import FixedAudio
-from app.paper import EvaluationPlan, PaperEntry
-from app.taskbank import TaskRevision
+from app.media.fixed_audio import FixedAudio
+from app.papers.paper import EvaluationPlan, PaperEntry
+from app.sessions.assessment_session import AssessmentSession, Attempt, _identity, _lock_task
+from app.taskbank.models import TaskRevision
 
 
 class Playback(Base):

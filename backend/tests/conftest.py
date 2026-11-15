@@ -10,7 +10,7 @@ from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 
 from app.database import create_database_engine
-from app.taskbank import TaskBank
+from app.taskbank.models import TaskBank
 
 
 @pytest.fixture

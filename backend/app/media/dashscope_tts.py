@@ -4,7 +4,7 @@ import io
 import os
 import wave
 
-from app.fixed_audio import AudioData
+from app.media.fixed_audio import AudioData
 
 
 class TTSError(Exception):

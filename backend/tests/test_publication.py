@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from test_paper import draft, entries
 from test_taskbank import CONTENT, write
 
-from app.fixed_audio import AudioStore
-from app.paper import (
+from app.media.fixed_audio import AudioStore
+from app.papers.paper import (
     EvaluationPlan,
     Paper,
     PaperEditConflict,
@@ -20,14 +20,14 @@ from app.paper import (
     remove_entry,
     replace_entry,
 )
-from app.publication import (
+from app.papers.publication import (
     PublicationBlocked,
     preflight_publication,
     publish,
     ready_for_new_session,
     select_plugin,
 )
-from app.scoring_registry import EvaluationContract, Registry
+from app.scoring.registry import EvaluationContract, Registry
 
 TEST_AUDIO_CONFIG = {
     "provider": "test",
