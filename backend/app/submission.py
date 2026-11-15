@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from app.assessment_session import Attempt, _identity, _lock_task
+from app.assessment_session import AssessmentSession, Attempt, _identity, _lock_task
 from app.database import Base
 from app.fixed_audio import FixedAudio
 from app.paper import EvaluationPlan, PaperEntry
@@ -52,6 +52,7 @@ class Submission(Base):
     __tablename__ = "submissions"
     __table_args__ = (
         UniqueConstraint("attempt_id", name="uq_submission_attempt"),
+        UniqueConstraint("submission_id", "session_task_id", name="uq_submission_task"),
         UniqueConstraint("session_task_id", "submit_request_id", name="uq_submission_request"),
         ForeignKeyConstraint(
             ["attempt_id", "session_task_id"],
@@ -87,8 +88,10 @@ class EvaluationIntent(Base):
     requirement_index: Mapped[int] = mapped_column(nullable=False)
 
 
-def _locked(session: Session, session_id: UUID, task_id: UUID, attempt_id: UUID):
-    task = _lock_task(session, session_id, task_id)
+def _locked(
+    session: Session, session_id: UUID, task_id: UUID, attempt_id: UUID, *, allow_closed=False
+):
+    task = _lock_task(session, session_id, task_id, allow_closed=allow_closed)
     attempt = session.scalar(
         select(Attempt)
         .where(Attempt.attempt_id == attempt_id, Attempt.session_task_id == task_id)
@@ -258,7 +261,7 @@ def submit_instruction(
     selected_choice_id: str,
 ) -> Submission:
     _identity(submit_request_id)
-    task, attempt = _locked(session, session_id, session_task_id, attempt_id)
+    task, attempt = _locked(session, session_id, session_task_id, attempt_id, allow_closed=True)
     existing = session.scalar(
         select(Submission).where(
             Submission.session_task_id == session_task_id,
@@ -272,6 +275,8 @@ def submit_instruction(
         ):
             raise ValueError("Submission request conflicts")
         return existing
+    if session.get(AssessmentSession, session_id).status != "IN_PROGRESS":
+        raise ValueError("Session is not in progress")
     revision = _revision(session, task)
     if revision.task_type != "instruction" or selected_choice_id not in ("A", "B", "C"):
         raise ValueError("Invalid instruction answer")

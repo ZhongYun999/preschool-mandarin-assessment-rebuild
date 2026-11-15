@@ -2,6 +2,7 @@ from alembic import context
 
 from app import (
     assessment_session,  # noqa: F401
+    close_manifest,  # noqa: F401
     fixed_audio,  # noqa: F401
     import_batch,  # noqa: F401
     paper,  # noqa: F401
