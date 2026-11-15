@@ -25,7 +25,7 @@ class EvaluationContract:
     version: str
     task_types: frozenset[str]
     validate_parameters: Callable[[Mapping[str, Any]], bool]
-    review_recommendation: Callable[[Mapping[str, Any]], bool] | None = None
+    review_recommendation: Callable[[Mapping[str, Any]], bool] | bool | None = None
 
 
 class Registry:
@@ -57,6 +57,9 @@ class Registry:
         requirements = json.loads(self._requirements[(plugin_id, version)])
         return requirements.get(task_type)
 
+    def task_types_for(self, plugin_id: str, version: str) -> set[str]:
+        return set(json.loads(self._requirements[(plugin_id, version)]))
+
     def supports(self, task_type: str, requirement: Mapping[str, Any]) -> bool:
         if set(requirement) != {"source", "version", "parameters"}:
             return False
@@ -86,6 +89,10 @@ class Registry:
             return None
         if contract.review_recommendation is None:
             return None
+        if contract.review_recommendation is False:
+            return False
+        if not callable(contract.review_recommendation):
+            raise TypeError("Invalid review recommendation contract")
         result = contract.review_recommendation(payload)
         if type(result) is not bool:
             raise ValueError("Review recommendation contract must return a boolean")

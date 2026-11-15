@@ -10,7 +10,7 @@
 
 [C1.0 跨模块实施合同](design/VNEXT_CROSS_MODULE_IMPLEMENTATION_CONTRACT_C1.0.md) 用于整合跨模块数据、事务及 API 合同，不覆盖既有专项设计；出现实质冲突时须报告并由用户裁决。
 
-## 当前收录的九份专项设计
+## 当前收录的专项设计
 
 | 范围 | 现行稿件 | 主要边界 |
 |---|---|---|
@@ -23,6 +23,7 @@
 | 评分与复核 | [S1.0](design/VNEXT_SCORING_PLUGIN_DUAL_STAGE_DESIGN_S1.0.md) | `score_task()` 单题折算，`score_paper()` 可反复汇总 |
 | 按需评测 | [E1.0](design/VNEXT_EVALUATION_REQUIREMENTS_SCHEDULING_E1.0.md) | 插件声明 ISE/LLM 需求，未声明不调用收费服务 |
 | Session / Worker | [SW1.1](design/VNEXT_SESSION_WORKER_LIFECYCLE_SW1.1.md) | 重做失效、输入关闭不可撤回、抽样复核及可靠作业 |
+| 复核策略 | [V1](design/VNEXT_REVIEW_POLICY_SAMPLING_V1.md) | 冻结比例、确定性抽样、来源建议与复核资格 |
 
 ## 已确认的新决策：纠正早期文档中的旧表述
 

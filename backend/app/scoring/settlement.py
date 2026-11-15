@@ -21,6 +21,12 @@ from app.scoring.models import (
     ReviewedPaperScore,
 )
 from app.scoring.registry import PRODUCTION_REGISTRY, Registry
+from app.scoring.review_policy import (
+    PolicyUndetermined,
+    review_reason,
+    sample_task,
+    validate_policy,
+)
 from app.sessions.assessment_session import AssessmentSession, SessionTask, _transaction
 from app.sessions.close_manifest import CloseManifest, SettlementIntent, manifest_entries
 from app.sessions.submission import Submission
@@ -68,6 +74,35 @@ def _evidence(db, submission, entry, revision, plan, registry):
     return evidence
 
 
+def diagnose_review_policy(
+    db: Session, *, session_id: UUID, registry: Registry = PRODUCTION_REGISTRY
+) -> str | None:
+    """Return why the frozen policy cannot be interpreted, without changing scores."""
+    owner = db.get(AssessmentSession, session_id)
+    if owner is None:
+        raise ValueError("Session does not exist")
+    paper = db.get(Paper, owner.paper_id)
+    if registry.resolve(paper.scoring_plugin_id, paper.scoring_plugin_version) is None:
+        return "Frozen scoring plugin version is unavailable"
+    entry_ids = {
+        str(entry_id)
+        for entry_id in db.scalars(
+            select(PaperEntry.paper_entry_id).where(PaperEntry.paper_id == paper.paper_id)
+        )
+    }
+    try:
+        validate_policy(
+            owner.review_policy,
+            task_types=registry.task_types_for(
+                paper.scoring_plugin_id, paper.scoring_plugin_version
+            ),
+            paper_entry_ids=entry_ids,
+        )
+    except PolicyUndetermined as exc:
+        return str(exc)
+    return None
+
+
 def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUCTION_REGISTRY):
     """Return the formal result, or None while evaluation/review is pending."""
     _transaction(db)
@@ -93,11 +128,22 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
     plugin = registry.resolve(paper.scoring_plugin_id, paper.scoring_plugin_version)
     if plugin is None:
         raise ValueError("Frozen scoring plugin version is unavailable")
+    entries = manifest_entries(db, manifest.manifest_id)
+    task_types = registry.task_types_for(paper.scoring_plugin_id, paper.scoring_plugin_version)
+    entry_ids = set(
+        db.scalars(select(PaperEntry.paper_entry_id).where(PaperEntry.paper_id == paper.paper_id))
+    )
+    entry_ids = {str(entry_id) for entry_id in entry_ids}
+    try:
+        validate_policy(owner.review_policy, task_types=task_types, paper_entry_ids=entry_ids)
+        policy_known = True
+    except PolicyUndetermined:
+        policy_known = False
     scores = []
-    review_tasks = []
-    review_unknown = False
+    review_tasks = {}
+    review_unknown = not policy_known
     incomplete = False
-    for item in manifest_entries(db, manifest.manifest_id):
+    for item in entries:
         task = db.get(SessionTask, item.session_task_id)
         entry = db.get(PaperEntry, task.paper_entry_id)
         revision = db.get(TaskRevision, entry.task_revision_id)
@@ -116,15 +162,32 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
         if evidence is None:
             incomplete = True
             continue
+        sampled = False
+        if policy_known:
+            sampled = sample_task(
+                owner.review_policy,
+                session_id=owner.session_id,
+                session_task_id=task.session_task_id,
+                paper_entry_id=entry.paper_entry_id,
+                task_type=revision.task_type,
+                task_types=task_types,
+                paper_entry_ids=entry_ids,
+            ).sampled
+        recommended, source_unknown = False, False
         for raw, requirement in zip(evidence, plan.requirements, strict=True):
-            if not isinstance(raw.payload, dict):
-                review_unknown = True
-                continue
-            recommendation = registry.review_recommendation(requirement, raw.payload)
+            recommendation = (
+                registry.review_recommendation(requirement, raw.payload)
+                if isinstance(raw.payload, dict)
+                else None
+            )
             if recommendation is None:
-                review_unknown = True
+                source_unknown = True
             elif recommendation:
-                review_tasks.append(task.session_task_id)
+                recommended = True
+        review_unknown |= source_unknown
+        reason = review_reason(sampled, recommended)
+        if reason and (not source_unknown or recommended):
+            review_tasks[task.session_task_id] = reason
         score = db.scalar(
             select(AutomaticTaskScore).where(
                 AutomaticTaskScore.manifest_id == manifest.manifest_id,
@@ -207,26 +270,24 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
         )
         db.add(paper_score)
         db.flush()
-    for task_id in set(review_tasks):
-        if (
-            db.scalar(
-                select(PendingReview).where(
-                    PendingReview.manifest_id == manifest.manifest_id,
-                    PendingReview.session_task_id == task_id,
-                )
+    for task_id, reason in review_tasks.items():
+        existing_review = db.scalar(
+            select(PendingReview).where(
+                PendingReview.manifest_id == manifest.manifest_id,
+                PendingReview.session_task_id == task_id,
             )
-            is None
-        ):
+        )
+        if existing_review is None:
             db.add(
                 PendingReview(
                     review_id=uuid4(),
                     manifest_id=manifest.manifest_id,
                     session_task_id=task_id,
-                    reason="MODEL_RECOMMENDED",
+                    reason=reason,
                 )
             )
-    # Earlier versions could persist a recommendation without source semantics.
-    # Preserve such facts, but do not silently treat them as resolved or discard them.
+        elif existing_review.reason != reason:
+            review_unknown = True
     db.flush()
     recorded_review_tasks = set(
         db.scalars(
@@ -237,15 +298,7 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
     )
     if recorded_review_tasks - set(review_tasks):
         review_unknown = True
-    # No general sampling interpreter exists yet. Recognize only the entire,
-    # explicit zero-sampling snapshot, not arbitrary policy with a zero field.
-    if (
-        review_unknown
-        or set(owner.review_policy) != {"sampling"}
-        or type(owner.review_policy["sampling"]) not in (int, float)
-        or owner.review_policy["sampling"] != 0
-    ):
-        db.flush()
+    if review_unknown:
         return None
     reviewed_score = None
     if review_tasks:
