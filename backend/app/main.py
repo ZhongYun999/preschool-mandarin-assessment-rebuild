@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.assessment_operations import router as assessment_operations_router
 from app.api.assessment_session import router as assessment_router
 from app.api.teacher_api import router as teacher_router
 from app.api.teacher_assessment import router as teacher_assessment_router
@@ -12,6 +13,7 @@ app.include_router(teacher_scoring_router)
 app.include_router(teacher_review_router)
 app.include_router(teacher_assessment_router)
 app.include_router(assessment_router)
+app.include_router(assessment_operations_router)
 
 
 @app.get("/health")

@@ -98,4 +98,15 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 管理方调用 `POST /teacher/assessment/sessions/{session_id}/access-token` 明确签发高熵 Session Bearer Token。明文只在这次响应中返回，数据库仅保存摘要，响应禁止缓存；通过受控渠道将 Token 交给施测端，不将其写入 URL、日志或仓库。每次调用都是**追加签发**：之前的 Token 继续有效，不隐式轮换或限制设备数量。若响应丢失或 Token 遗失，管理方再次签发新的 Token；数据库无法恢复旧明文。当前没有撤销单个 Token 的接口，泄漏凭据的撤销方案需另行实现。
 
-施测端使用对应 Token 调用 `GET /assessment/sessions/{session_id}`，返回当前 Attempt、是否有当前 Submission、可用业务动作及关闭／正式成绩状态。动作名称是领域状态投影，并不表示本阶段已提供对应写接口；播放、提交和资源交互留待后续实现。Session Token 不能用于其他 Session 或教师管理接口。
+施测端使用对应 Token 调用 `GET /assessment/sessions/{session_id}`，返回当前 Attempt、是否有当前 Submission、可用业务动作及关闭／正式成绩状态。Session Token 不能用于其他 Session 或教师管理接口。所有施测请求（包括音频和图片）通过 `Authorization: Bearer <token>` 传递凭据，不使用 URL 查询参数；响应中的资源路径也需要携带同一凭据。
+
+选择题施测接口以 `/assessment/sessions/{session_id}` 为前缀：
+
+- `GET /tasks/{session_task_id}/content` 返回冻结题干、中性 A/B/C 选项、图片与音频资源路径；`GET` 相应路径读取经摘要校验的二进制内容。
+- `GET /tasks/{session_task_id}/attempt` 恢复当前 Attempt 和播放事实；`POST` 同一路径开始或返回当前 Attempt，不会隐式重做。
+- `POST /tasks/{session_task_id}/playbacks` 接受 `attempt_id`、稳定 `request_id`、`kind`（`GUIDE`、`INITIAL_PROMPT`、`USER_REPLAY` 或 `TECHNICAL_RETRY`）；技术重试携带原播放的 `retry_of_id`。`POST /tasks/{session_task_id}/playbacks/{playback_id}/finish` 接受 `attempt_id` 和布尔值 `completed`，明确报告完成或失败。刷新后应查询既有播放事实，不自动确认成功。
+- `POST /tasks/{session_task_id}/submissions/instruction` 接受 `attempt_id`、稳定 `submit_request_id` 和 `selected_choice_id`（A/B/C）；返回 `ACCEPTED` 只表示正式接收，成绩尚未必生成。
+- `POST /tasks/{session_task_id}/redo` 接受稳定 `redo_request_id`，显式切换当前 Attempt。旧播放正在进行时也可重做，客户端应停止旧音频；旧回执不能改变新 Attempt。
+- `POST /close` 接受稳定 `close_request_id`；未完成时返回 409 和缺失题目，成功返回 `INPUT_CLOSED` 与 Manifest 身份，后续评分异步进行。
+
+结构非法返回 422，凭据无效返回 401，题目或资源不存在返回 404，状态或幂等请求冲突返回 409。写操作的请求标识在网络重试时应保持不变。

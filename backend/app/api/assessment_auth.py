@@ -16,6 +16,7 @@ from app.sessions.credentials import SessionCredential
 TOKEN_PATTERN = re.compile(r"as1_[A-Za-z0-9_-]{43}\Z")
 credential_dependency = Depends(bearer)
 db_dependency = Depends(get_db)
+write_auth_db_dependency = Depends(get_db, use_cache=False)
 
 
 def _check_access(
@@ -41,7 +42,7 @@ def _check_access(
 def require_session_access(
     session_id: UUID,
     credentials: HTTPAuthorizationCredentials | None = credential_dependency,
-    db: Session = db_dependency,
+    db: Session = write_auth_db_dependency,
 ) -> UUID:
     """Reusable session authorization for future assessment actions."""
     return _check_access(session_id, credentials, db)
