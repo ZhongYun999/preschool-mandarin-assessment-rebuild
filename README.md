@@ -91,3 +91,11 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 题库及资源管理继续使用私有 `TEACHER_MANAGEMENT_TOKEN`。复核写入使用独立的个人高熵随机 Bearer Token；服务端私有环境变量 `TEACHER_REVIEW_TOKEN_HASHES` 保存 JSON 对象，键为稳定教师身份，值为对应 Token 的 SHA-256 十六进制摘要。配置结构示例：`{"teacher-id-a":"<sha256-hex>","teacher-id-b":"<sha256-hex>"}`；占位内容不能直接用于认证。每位教师使用不同 Token，任何摘要不得重复，也不得与共享管理 Token 对应的摘要相同。通过安全渠道生成、分发和轮换凭据，不将原始 Token 或摘要提交仓库、写入日志或 URL。
 
 个人复核 Token 可访问教师评分查询及复核决定接口，不能访问题库或资源管理接口；共享管理 Token 可查询但不能作为复核操作人的身份。未配置或配置无效时复核写入失败关闭，不影响共享管理 Token 的既有管理访问。当前凭据不提供班级、学校或组织级细粒度授权，生产评分 Registry 尚无正式插件。
+
+### 施测 Session 与访问凭据
+
+共享管理凭据可调用 `POST /teacher/assessment/sessions`，提交 `paper_id`、稳定的 `create_request_id` 和 V1 `review_policy` 创建 Session。重复创建请求返回同一 Session，不签发或改变访问凭据；不同参数复用请求标识会冲突。新 Session 必须使用可解释的 V1 复核策略，既有历史策略的幂等重传保持原样。
+
+管理方调用 `POST /teacher/assessment/sessions/{session_id}/access-token` 明确签发高熵 Session Bearer Token。明文只在这次响应中返回，数据库仅保存摘要，响应禁止缓存；通过受控渠道将 Token 交给施测端，不将其写入 URL、日志或仓库。每次调用都是**追加签发**：之前的 Token 继续有效，不隐式轮换或限制设备数量。若响应丢失或 Token 遗失，管理方再次签发新的 Token；数据库无法恢复旧明文。当前没有撤销单个 Token 的接口，泄漏凭据的撤销方案需另行实现。
+
+施测端使用对应 Token 调用 `GET /assessment/sessions/{session_id}`，返回当前 Attempt、是否有当前 Submission、可用业务动作及关闭／正式成绩状态。动作名称是领域状态投影，并不表示本阶段已提供对应写接口；播放、提交和资源交互留待后续实现。Session Token 不能用于其他 Session 或教师管理接口。
