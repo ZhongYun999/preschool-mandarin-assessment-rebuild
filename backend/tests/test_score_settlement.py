@@ -200,7 +200,16 @@ def test_required_evidence_and_model_review(db, context, tmp_path):
         {"source": "fake", "version": "1", "parameters": {}},
     )
     registry = Registry(
-        [plugin], [EvaluationContract("fake", "1", frozenset({"instruction"}), lambda p: p == {})]
+        [plugin],
+        [
+            EvaluationContract(
+                "fake",
+                "1",
+                frozenset({"instruction"}),
+                lambda p: p == {},
+                lambda payload: payload.get("review_recommended") is True,
+            )
+        ],
     )
     with Session(db) as s, s.begin():
         paper_id = s.get(AssessmentSession, context["session_id"]).paper_id
