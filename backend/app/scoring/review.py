@@ -9,7 +9,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.papers.paper import EvaluationPlan, Paper, PaperEntry
 from app.scoring.models import (
     AutomaticPaperScore,
@@ -19,9 +18,11 @@ from app.scoring.models import (
     ReviewedPaperScore,
 )
 from app.scoring.registry import PRODUCTION_REGISTRY, Registry
-from app.scoring.settlement import _json_result
+from app.scoring.review_policy import PolicyUndetermined, review_reason, sample_task
+from app.scoring.settlement import _evidence, _json_result
 from app.sessions.assessment_session import AssessmentSession, SessionTask, _identity, _transaction
 from app.sessions.close_manifest import CloseManifest, manifest_entries
+from app.sessions.submission import Submission
 from app.taskbank.models import TaskRevision
 
 
@@ -106,16 +107,13 @@ def record_review(
         ),
         None,
     )
-    if (
-        item is None
-        or db.scalar(
-            select(PendingReview).where(
-                PendingReview.manifest_id == manifest.manifest_id,
-                PendingReview.session_task_id == session_task_id,
-            )
+    pending = db.scalar(
+        select(PendingReview).where(
+            PendingReview.manifest_id == manifest.manifest_id,
+            PendingReview.session_task_id == session_task_id,
         )
-        is None
-    ):
+    )
+    if item is None or pending is None:
         raise ValueError("Submission is not selected for review")
     paper = db.get(Paper, owner.paper_id)
     plugin = registry.resolve(paper.scoring_plugin_id, paper.scoring_plugin_version)
@@ -138,32 +136,46 @@ def record_review(
     )
     if automatic is None or automatic.submission_id != submission_id:
         raise ValueError("Automatic task score is not ready")
-    recommended = False
-    for raw_id in automatic.raw_evaluation_ids:
-        raw = db.get(RawEvaluation, UUID(raw_id))
-        job = db.get(EvaluationJob, raw.job_id)
-        refs = job.input_refs or {}
-        if (
-            raw.status != "READY"
-            or job.status != "READY"
-            or raw.submission_id != submission_id
-            or job.submission_id != submission_id
-            or job.paper_entry_id != entry.paper_entry_id
-            or job.requirement_index < 0
-            or job.requirement_index >= len(plan.requirements)
-            or job.requirement != plan.requirements[job.requirement_index]
-            or not registry.supports(revision_data.task_type, job.requirement)
-            or raw.input_refs != job.input_refs
-            or raw.input_fingerprint != job.input_fingerprint
-            or refs.get("submission_id") != str(submission_id)
-            or refs.get("paper_entry_id") != str(entry.paper_entry_id)
-            or refs.get("task_revision_id") != str(revision_data.task_revision_id)
-        ):
-            raise ValueError("Review evidence identity does not match")
-        if registry.review_recommendation(job.requirement, raw.payload) is True:
+    submission = db.get(Submission, submission_id)
+    evidence = _evidence(db, submission, entry, revision_data, plan, registry)
+    if evidence is None or automatic.raw_evaluation_ids != [
+        str(raw.evaluation_id) for raw in evidence
+    ]:
+        raise ValueError("Review evidence is not ready or does not match")
+    recommended, source_unknown = False, False
+    for raw, requirement in zip(evidence, plan.requirements, strict=True):
+        recommendation = (
+            registry.review_recommendation(requirement, raw.payload)
+            if isinstance(raw.payload, dict)
+            else None
+        )
+        if recommendation is None:
+            source_unknown = True
+        elif recommendation:
             recommended = True
-    if not recommended:
-        raise ValueError("Review selection has no validated source recommendation")
+    entry_ids = {
+        str(entry_id)
+        for entry_id in db.scalars(
+            select(PaperEntry.paper_entry_id).where(PaperEntry.paper_id == paper.paper_id)
+        )
+    }
+    try:
+        sampled = sample_task(
+            owner.review_policy,
+            session_id=owner.session_id,
+            session_task_id=task.session_task_id,
+            paper_entry_id=entry.paper_entry_id,
+            task_type=revision_data.task_type,
+            task_types=registry.task_types_for(
+                paper.scoring_plugin_id, paper.scoring_plugin_version
+            ),
+            paper_entry_ids=entry_ids,
+        ).sampled
+    except PolicyUndetermined:
+        sampled = False
+    reason = review_reason(sampled, recommended)
+    if reason is None or pending.reason != reason or (source_unknown and not recommended):
+        raise ValueError("Review selection has no validated source recommendation or sampling")
     effective_result = None
     if action == "OVERRIDE":
         apply_override = getattr(plugin, "apply_override", None)
