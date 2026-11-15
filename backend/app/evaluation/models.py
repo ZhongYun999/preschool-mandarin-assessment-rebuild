@@ -37,7 +37,7 @@ class EvaluationJob(Base):
             name="fk_job_intent_identity",
         ),
         CheckConstraint(
-            "status IN ('WAITING','RUNNING','READY','FAILED','INVALID','UNKNOWN')",
+            "status IN ('WAITING','RUNNING','READY','FAILED','INVALID','UNKNOWN','SKIPPED')",
             name="ck_evaluation_job_status",
         ),
         CheckConstraint(
@@ -49,7 +49,7 @@ class EvaluationJob(Base):
             name="ck_evaluation_job_input_pair",
         ),
         CheckConstraint(
-            "status = 'WAITING' OR input_fingerprint IS NOT NULL",
+            "status IN ('WAITING','SKIPPED') OR input_fingerprint IS NOT NULL",
             name="ck_evaluation_job_claim_input",
         ),
         CheckConstraint(
@@ -58,6 +58,15 @@ class EvaluationJob(Base):
         CheckConstraint(
             "input_refs IS NULL OR jsonb_typeof(input_refs) = 'object'",
             name="ck_evaluation_job_input_refs",
+        ),
+        Index(
+            "ix_evaluation_jobs_waiting",
+            "last_checked_at",
+            "job_id",
+            postgresql_where=text("status = 'WAITING'"),
+        ),
+        Index(
+            "ix_evaluation_jobs_expired", "lease_until", postgresql_where=text("status = 'RUNNING'")
         ),
     )
     job_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -73,6 +82,10 @@ class EvaluationJob(Base):
     input_fingerprint: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_code: Mapped[str | None] = mapped_column(Text)
+    last_checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    dispatch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

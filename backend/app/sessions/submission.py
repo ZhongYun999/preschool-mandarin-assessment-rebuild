@@ -11,11 +11,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Text,
     UniqueConstraint,
     Uuid,
     func,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -84,6 +86,11 @@ class EvaluationIntent(Base):
             "requirement_index",
             name="uq_intent_identity",
         ),
+        Index(
+            "ix_evaluation_intents_pending",
+            "intent_id",
+            postgresql_where=text("scheduled_at IS NULL"),
+        ),
     )
     intent_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     submission_id: Mapped[UUID] = mapped_column(
@@ -93,6 +100,7 @@ class EvaluationIntent(Base):
         ForeignKey("evaluation_plans.paper_entry_id"), nullable=False
     )
     requirement_index: Mapped[int] = mapped_column(nullable=False)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 def _locked(
