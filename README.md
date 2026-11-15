@@ -66,7 +66,7 @@ python -m unittest discover -s scripts -p 'test_*.py'
 
 ### HTTP 两阶段 Excel 导入
 
-教师凭据适用于所有接口。向 `POST /teacher/banks/{bank_id}/import-previews` 以 multipart `file` 上传 XLSX；有效预览返回 `preview_id`、行级变化及问题，错误文件返回 422 和行列信息。可通过 `GET /teacher/banks/{bank_id}/import-previews/{preview_id}` 恢复预览；确认时向对应的 `/confirm` 发送 JSON `{"operation_id":"调用方稳定生成的标识"}`。确认返回既有导入报告；基线过期和操作 ID 冲突分别以 409 及不同错误代码返回。
+共享管理凭据适用于以下题库管理接口。向 `POST /teacher/banks/{bank_id}/import-previews` 以 multipart `file` 上传 XLSX；有效预览返回 `preview_id`、行级变化及问题，错误文件返回 422 和行列信息。可通过 `GET /teacher/banks/{bank_id}/import-previews/{preview_id}` 恢复预览；确认时向对应的 `/confirm` 发送 JSON `{"operation_id":"调用方稳定生成的标识"}`。确认返回既有导入报告；基线过期和操作 ID 冲突分别以 409 及不同错误代码返回。
 
 原始 XLSX 与预览基线暂存在 `TASKBANK_PREVIEW_ROOT` 指定的私有持久目录，默认 `uploads/import-previews`，被 Git 忽略；配置目录应在所有服务实例间保持一致并限制操作系统访问权限。预览不会自动过期或清理，以支持重启与重试；后续需要运维安排清理，但不要删除仍需确认或重试的预览。
 
@@ -80,8 +80,14 @@ PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 
 
 DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启动命令为 `python -m app.media.tts_worker`（从 `backend` 目录执行）。发布调用应显式冻结 `provider=dashscope`、模型、音色、`version=cosyvoice-sdk-v2`、语速、`format=wav` 和 `sample_rate`；可选地域和业务空间也必须由调用方明确提供。本阶段只支持 WAV，其他配置会明确拒绝，不会静默忽略。合成不会修改冻结的原文。
 
-教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 返回等待独立 Worker 扫描的提示；202 不表示已扫描、已开始生成或已立即排队。`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。所有接口需要教师 Bearer 凭据。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
+教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 返回等待独立 Worker 扫描的提示；202 不表示已扫描、已开始生成或已立即排队。`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。这些音频管理接口需要共享管理 Bearer 凭据。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
 
 ## 评价调度入口
 
 `app.evaluation.worker.run_once()` 执行一轮有界调度，调用方需提供数据库 engine、评价合同 Registry、适配器映射、租约时长和批次大小，并按部署需要重复调用。当前没有生产评价适配器；空映射不会产生成功评价。已被重做取代且尚未跨过外发边界的作业会标记为 `SKIPPED`；跨过外发边界后的旧调用可能仍产生费用并保留历史结果。外呼结果不明的作业必须显式授权后才可重试。
+
+### 教师复核凭据
+
+题库及资源管理继续使用私有 `TEACHER_MANAGEMENT_TOKEN`。复核写入使用独立的个人高熵随机 Bearer Token；服务端私有环境变量 `TEACHER_REVIEW_TOKEN_HASHES` 保存 JSON 对象，键为稳定教师身份，值为对应 Token 的 SHA-256 十六进制摘要。配置结构示例：`{"teacher-id-a":"<sha256-hex>","teacher-id-b":"<sha256-hex>"}`；占位内容不能直接用于认证。每位教师使用不同 Token，任何摘要不得重复，也不得与共享管理 Token 对应的摘要相同。通过安全渠道生成、分发和轮换凭据，不将原始 Token 或摘要提交仓库、写入日志或 URL。
+
+个人复核 Token 可访问教师评分查询及复核决定接口，不能访问题库或资源管理接口；共享管理 Token 可查询但不能作为复核操作人的身份。未配置或配置无效时复核写入失败关闭，不影响共享管理 Token 的既有管理访问。当前凭据不提供班级、学校或组织级细粒度授权，生产评分 Registry 尚无正式插件。

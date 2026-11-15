@@ -17,7 +17,7 @@ from app.scoring.models import (
     ReviewDecision,
     ReviewedPaperScore,
 )
-from app.scoring.registry import PRODUCTION_REGISTRY, Registry
+from app.scoring.registry import PRODUCTION_REGISTRY, Registry, ScoringUnavailable
 from app.scoring.review_policy import PolicyUndetermined, review_reason, sample_task
 from app.scoring.settlement import _evidence, _json_result
 from app.sessions.assessment_session import AssessmentSession, SessionTask, _identity, _transaction
@@ -28,6 +28,10 @@ from app.taskbank.models import TaskRevision
 
 class ReviewConflict(ValueError):
     """The review revision changed before the requested operation."""
+
+
+class InvalidOverride(ValueError):
+    """The frozen scoring plugin rejected the requested override value."""
 
 
 def record_review(
@@ -46,7 +50,8 @@ def record_review(
     """Record one decision; plugins may implement apply_override(context, automatic, value).
 
     That method validates the submitted value and returns the plugin's full task
-    score representation. It must be deterministic and must not call external services.
+    score representation. A ValueError means the value was rejected; unexpected
+    failures propagate. It must be deterministic and must not call external services.
     """
     _transaction(db)
     _identity(operation_id)
@@ -118,7 +123,7 @@ def record_review(
     paper = db.get(Paper, owner.paper_id)
     plugin = registry.resolve(paper.scoring_plugin_id, paper.scoring_plugin_version)
     if plugin is None:
-        raise ValueError("Frozen scoring plugin version is unavailable")
+        raise ScoringUnavailable("Frozen scoring plugin version is unavailable")
     automatic_paper = db.scalar(
         select(AutomaticPaperScore).where(AutomaticPaperScore.manifest_id == manifest.manifest_id)
     )
@@ -180,9 +185,9 @@ def record_review(
     if action == "OVERRIDE":
         apply_override = getattr(plugin, "apply_override", None)
         if not callable(apply_override):
-            raise ValueError("Frozen scoring plugin does not support overrides")
-        effective_result = _json_result(
-            apply_override(
+            raise ScoringUnavailable("Frozen scoring plugin does not support overrides")
+        try:
+            overridden = apply_override(
                 {
                     "task_type": revision_data.task_type,
                     "task_revision_id": str(revision_data.task_revision_id),
@@ -192,7 +197,9 @@ def record_review(
                 json.loads(json.dumps(automatic.result)),
                 json.loads(json.dumps(value)),
             )
-        )
+        except ValueError as exc:
+            raise InvalidOverride("Override rejected by scoring plugin") from exc
+        effective_result = _json_result(overridden)
     decision = ReviewDecision(
         decision_id=uuid4(),
         manifest_id=manifest.manifest_id,
