@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+class ScoringUnavailable(ValueError):
+    """The frozen scoring or evaluation capability is unavailable."""
+
+
 class ScoringPlugin(Protocol):
     plugin_id: str
     implementation_version: str

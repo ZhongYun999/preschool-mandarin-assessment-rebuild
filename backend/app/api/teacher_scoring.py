@@ -12,7 +12,7 @@ from sqlalchemy import exists, func, select, text
 from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_db
-from app.api.teacher_auth import require_teacher
+from app.api.teacher_auth import require_scoring_access
 from app.evaluation.models import EvaluationJob
 from app.papers.paper import EvaluationPlan, Paper, PaperEntry
 from app.scoring.models import (
@@ -29,7 +29,7 @@ from app.sessions.close_manifest import CloseManifest, CloseManifestEntry
 from app.sessions.submission import Submission
 from app.taskbank.models import TaskRevision
 
-router = APIRouter(prefix="/teacher", dependencies=[Depends(require_teacher)])
+router = APIRouter(prefix="/teacher", dependencies=[Depends(require_scoring_access)])
 db_dependency = Depends(get_db)
 
 

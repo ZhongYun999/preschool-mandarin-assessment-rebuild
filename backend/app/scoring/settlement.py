@@ -20,7 +20,7 @@ from app.scoring.models import (
     ReviewDecision,
     ReviewedPaperScore,
 )
-from app.scoring.registry import PRODUCTION_REGISTRY, Registry
+from app.scoring.registry import PRODUCTION_REGISTRY, Registry, ScoringUnavailable
 from app.scoring.review_policy import (
     PolicyUndetermined,
     review_reason,
@@ -43,7 +43,7 @@ def _evidence(db, submission, entry, revision, plan, registry):
     evidence = []
     for index, requirement in enumerate(plan.requirements):
         if not registry.supports(revision.task_type, requirement):
-            raise ValueError("Frozen evaluation contract is unavailable")
+            raise ScoringUnavailable("Frozen evaluation contract is unavailable")
         job = db.scalar(
             select(EvaluationJob).where(
                 EvaluationJob.submission_id == submission.submission_id,
@@ -127,7 +127,7 @@ def settle_session(db: Session, *, session_id: UUID, registry: Registry = PRODUC
     paper = db.get(Paper, owner.paper_id)
     plugin = registry.resolve(paper.scoring_plugin_id, paper.scoring_plugin_version)
     if plugin is None:
-        raise ValueError("Frozen scoring plugin version is unavailable")
+        raise ScoringUnavailable("Frozen scoring plugin version is unavailable")
     entries = manifest_entries(db, manifest.manifest_id)
     task_types = registry.task_types_for(paper.scoring_plugin_id, paper.scoring_plugin_version)
     entry_ids = set(
