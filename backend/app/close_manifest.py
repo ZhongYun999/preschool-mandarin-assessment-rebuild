@@ -76,6 +76,12 @@ class IncompleteSession(ValueError):
         self.task_ids = task_ids
 
 
+class SessionTaskIntegrityError(ValueError):
+    def __init__(self, missing_paper_entry_ids: list[UUID]):
+        super().__init__("Session task set does not match the published paper")
+        self.missing_paper_entry_ids = missing_paper_entry_ids
+
+
 def close_session(session: Session, *, session_id: UUID, close_request_id: str) -> CloseManifest:
     """Caller must authorize session access before invoking, including idempotent retries."""
     _identity(close_request_id)
@@ -103,6 +109,15 @@ def close_session(session: Session, *, session_id: UUID, close_request_id: str) 
         .with_for_update(of=SessionTask)
         .execution_options(populate_existing=True)
     ).all()
+    expected_entries = session.scalars(
+        select(PaperEntry.paper_entry_id)
+        .where(PaperEntry.paper_id == owner.paper_id)
+        .order_by(PaperEntry.position)
+    ).all()
+    task_entries = {task.paper_entry_id for task in tasks}
+    missing_entries = [entry_id for entry_id in expected_entries if entry_id not in task_entries]
+    if missing_entries or task_entries != set(expected_entries):
+        raise SessionTaskIntegrityError(missing_entries)
     missing, accepted = [], []
     for task in tasks:
         attempt = None

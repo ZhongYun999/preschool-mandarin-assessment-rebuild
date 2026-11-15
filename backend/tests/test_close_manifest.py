@@ -23,6 +23,7 @@ from app.assessment_session import (
     AssessmentSession,
     Attempt,
     SessionTask,
+    create_session,
     ordered_tasks,
     redo_attempt,
     start_attempt,
@@ -31,6 +32,7 @@ from app.close_manifest import (
     CloseManifest,
     CloseManifestEntry,
     IncompleteSession,
+    SessionTaskIntegrityError,
     SettlementIntent,
     close_session,
     manifest_entries,
@@ -321,7 +323,10 @@ def test_downgrade_preserves_close(db, context):
             command.downgrade(config, "0009_submission")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM close_manifests")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0010_close_manifest"
+        assert (
+            c.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0011_session_task_identity"
+        )
 
 
 @pytest.mark.parametrize("first_action", ["submit", "redo"])
@@ -427,3 +432,104 @@ def test_empty_published_paper_is_not_given_a_new_item_minimum(db, bank, tmp_pat
         manifest = close_session(s, session_id=sid, close_request_id="close")
         assert manifest_entries(s, manifest.manifest_id) == []
         assert s.get(SettlementIntent, manifest.manifest_id) is not None
+
+
+def new_unstarted_session(db, existing, tmp_path):
+    plugin = TestPlugin()
+    plugin.evaluation_requirements["instruction"] = ()
+    reg = Registry([plugin], [])
+    with Session(db) as s, s.begin():
+        paper_id = s.get(AssessmentSession, existing["session_id"]).paper_id
+        sid = create_session(
+            s,
+            paper_id=paper_id,
+            scope="second-caller",
+            create_request_id="new",
+            review_policy={"sampling": 0.25},
+            store=AudioStore(tmp_path),
+            registry=reg,
+        ).session_id
+        rows = ordered_tasks(s, sid)
+        return sid, [(t.session_task_id, t.paper_entry_id) for t in rows]
+
+
+def test_unstarted_task_cannot_be_deleted_or_reassigned(db, two_tasks, tmp_path):
+    sid, rows = new_unstarted_session(db, two_tasks[0], tmp_path)
+    task_id, entry_id = rows[0]
+    with Session(db) as s:
+        paper_id = s.get(AssessmentSession, sid).paper_id
+    for sql, values in (
+        ("DELETE FROM session_tasks WHERE session_task_id=:task", {"task": task_id}),
+        (
+            "UPDATE session_tasks SET session_task_id=:value WHERE session_task_id=:task",
+            {"task": task_id, "value": uuid4()},
+        ),
+        (
+            "UPDATE session_tasks SET session_id=:value WHERE session_task_id=:task",
+            {"task": task_id, "value": two_tasks[0]["session_id"]},
+        ),
+        (
+            "UPDATE session_tasks SET paper_id=:value WHERE session_task_id=:task",
+            {"task": task_id, "value": uuid4()},
+        ),
+        (
+            "UPDATE session_tasks SET paper_entry_id=:value WHERE session_task_id=:task",
+            {"task": task_id, "value": rows[1][1]},
+        ),
+    ):
+        with pytest.raises(DBAPIError, match="session task identity"), db.begin() as c:
+            c.execute(text(sql), values)
+    with Session(db) as s, s.begin():
+        task = s.get(SessionTask, task_id)
+        assert (task.session_id, task.paper_id, task.paper_entry_id) == (sid, paper_id, entry_id)
+        first = start_attempt(s, session_id=sid, session_task_id=task_id).attempt_id
+        current = redo_attempt(
+            s, session_id=sid, session_task_id=task_id, redo_request_id="redo"
+        ).attempt_id
+        assert task.current_attempt_id == current
+        assert s.get(Attempt, first).status == "ABANDONED"
+
+
+def test_close_and_upgrade_reject_preexisting_missing_task(db, two_tasks, tmp_path):
+    sid, rows = new_unstarted_session(db, two_tasks[0], tmp_path)
+    missing_task, missing_entry = rows[0]
+    with Session(db) as s, s.begin():
+        remaining_attempt = start_attempt(s, session_id=sid, session_task_id=rows[1][0]).attempt_id
+    remaining = {
+        "session_id": sid,
+        "session_task_id": rows[1][0],
+        "attempt_id": remaining_attempt,
+    }
+    deliver(db, remaining)
+    with Session(db) as s, s.begin():
+        submit(s, remaining)
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with db.connect() as c:
+        config.attributes["connection"] = c
+        command.downgrade(config, "0010_close_manifest")
+        c.commit()
+        c.execute(text("DELETE FROM session_tasks WHERE session_task_id=:id"), {"id": missing_task})
+        c.commit()
+        with pytest.raises(SessionTaskIntegrityError) as exc, Session(bind=c) as s, s.begin():
+            close_session(s, session_id=sid, close_request_id="close")
+        assert exc.value.missing_paper_entry_ids == [missing_entry]
+        c.rollback()
+        assert (
+            c.scalar(
+                text("SELECT status FROM assessment_sessions WHERE session_id=:id"), {"id": sid}
+            )
+            == "IN_PROGRESS"
+        )
+        assert (
+            c.scalar(text("SELECT count(*) FROM close_manifests WHERE session_id=:id"), {"id": sid})
+            == 0
+        )
+        c.commit()
+        with pytest.raises(DBAPIError, match="require reconciliation"):
+            command.upgrade(config, "head")
+        c.rollback()
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0010_close_manifest"
+        assert (
+            c.scalar(text("SELECT count(*) FROM session_tasks WHERE session_id=:id"), {"id": sid})
+            == 1
+        )
