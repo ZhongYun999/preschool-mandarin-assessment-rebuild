@@ -13,11 +13,11 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from test_taskbank_import import commit, picture, xlsx
 
-from app.import_batch import ImportBatch
-from app.import_preview_store import PreviewStore
-from app.taskbank import Asset, TaskBank, TaskIdentity, TaskRevision
-from app.taskbank_storage import ImageStore
-from app.teacher_api import get_db, get_image_store, get_preview_store, router
+from app.api.teacher_api import get_db, get_image_store, get_preview_store, router
+from app.taskbank.image_store import ImageStore
+from app.taskbank.import_batch import ImportBatch
+from app.taskbank.models import Asset, TaskBank, TaskIdentity, TaskRevision
+from app.taskbank.preview_store import PreviewStore
 
 AUTH = {"Authorization": "Bearer test-token-only"}
 
@@ -39,7 +39,7 @@ def make_app(db, images, previews):
 @pytest.fixture
 def setup(db, tmp_path, monkeypatch):
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token-only")
-    monkeypatch.setattr("app.teacher_auth.load_dotenv", lambda: None)
+    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
     images, previews = tmp_path / "images", tmp_path / "previews"
     app = make_app(db, images, previews)
     with TestClient(app) as client:

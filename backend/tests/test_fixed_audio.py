@@ -15,11 +15,18 @@ from test_paper import draft, entries
 from test_publication import TEST_AUDIO_CONFIG, choose, registry, setup_paper
 from test_taskbank import CONTENT, write
 
-from app.fixed_audio import AudioData, AudioStore, FixedAudio, prepare_audio, readiness, text_hash
-from app.paper import Paper, PaperEntry, add_entry, copy_paper
-from app.publication import publish
-from app.tts_attempt import TTSAttempt
-from app.tts_worker import authorize_retry, run_audio
+from app.media.fixed_audio import (
+    AudioData,
+    AudioStore,
+    FixedAudio,
+    prepare_audio,
+    readiness,
+    text_hash,
+)
+from app.media.tts_attempt import TTSAttempt
+from app.media.tts_worker import authorize_retry, run_audio
+from app.papers.paper import Paper, PaperEntry, add_entry, copy_paper
+from app.papers.publication import publish
 
 
 def wav():

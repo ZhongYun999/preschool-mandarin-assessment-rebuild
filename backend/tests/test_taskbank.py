@@ -9,7 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from app.taskbank import (
+from app.taskbank.models import (
     Asset,
     RevisionContent,
     TaskBank,

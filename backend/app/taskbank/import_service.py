@@ -13,8 +13,10 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.import_batch import ImportBatch
-from app.taskbank import (
+from app.taskbank.excel import SHEET, TYPE_LABELS, Issue, PreviewRow, preflight_xlsx
+from app.taskbank.image_store import ImageStore
+from app.taskbank.import_batch import ImportBatch
+from app.taskbank.models import (
     Asset,
     TaskBank,
     TaskIdentity,
@@ -22,8 +24,6 @@ from app.taskbank import (
     append_revision,
     revision_fingerprint,
 )
-from app.taskbank_excel import SHEET, TYPE_LABELS, Issue, PreviewRow, preflight_xlsx
-from app.taskbank_storage import ImageStore
 
 
 class InvalidImportPreview(ValueError):

@@ -14,10 +14,9 @@ from sqlalchemy.orm import Session
 from test_paper import entries
 from test_publication import TEST_AUDIO_CONFIG, choose, registry, setup_paper
 
-from app import import_batch, paper, taskbank  # noqa: F401
 from app.database import Base, create_database_engine
-from app.paper import EvaluationPlan, copy_paper
-from app.publication import publish
+from app.papers.paper import EvaluationPlan, copy_paper
+from app.papers.publication import publish
 
 
 def test_postgres_connection_and_migration_cycle(monkeypatch):

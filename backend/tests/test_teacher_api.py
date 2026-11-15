@@ -7,16 +7,16 @@ from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 from test_taskbank_import import commit, picture, xlsx
 
+from app.api.teacher_api import get_db, get_image_store
 from app.main import app
-from app.taskbank import RevisionContent, append_revision
-from app.taskbank_storage import ImageStore
-from app.teacher_api import get_db, get_image_store
+from app.taskbank.image_store import ImageStore
+from app.taskbank.models import RevisionContent, append_revision
 
 
 @pytest.fixture
 def client(db, tmp_path, monkeypatch):
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "example-only-test-token")
-    monkeypatch.setattr("app.teacher_auth.load_dotenv", lambda: None)
+    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
 
     def session_override():
         with Session(db) as s:
@@ -225,7 +225,7 @@ def test_missing_or_tampered_asset_not_returned(client, db, tmp_path):
     base = f"/teacher/banks/{bank}/tasks/{item['task_id']}/revisions/{item['revision_id']}"
     detail = client.get(base, headers=AUTH).json()
     image = detail["images"]["option_A"]
-    from app.taskbank import Asset
+    from app.taskbank.models import Asset
 
     with Session(db) as s:
         asset = s.get(Asset, UUID(image["asset_id"]))
@@ -270,7 +270,7 @@ def test_teacher_detail_contains_scoring_fields_and_no_public_route(client, db):
 def test_image_cannot_resolve_outside_storage_root(client, db, tmp_path):
     from hashlib import sha256
 
-    from app.taskbank import Asset
+    from app.taskbank.models import Asset
 
     bank = make_bank(client)
     data = b"not-for-this-root"

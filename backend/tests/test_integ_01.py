@@ -19,9 +19,11 @@ from test_import_http import AUTH, confirm, make_app, upload
 from test_publication import TEST_AUDIO_CONFIG, TestPlugin
 from test_taskbank_import import picture
 
-from app.fixed_audio import AudioData, AudioStore, FixedAudio
-from app.import_batch import ImportBatch
-from app.paper import (
+from app.api.teacher_api import get_audio_store
+from app.media.fixed_audio import AudioData, AudioStore, FixedAudio
+from app.media.tts_attempt import TTSAttempt
+from app.media.tts_worker import run_audio, run_once
+from app.papers.paper import (
     EvaluationPlan,
     Paper,
     PaperEditConflict,
@@ -32,13 +34,16 @@ from app.paper import (
     reorder_entries,
     replace_entry,
 )
-from app.publication import preflight_publication, publish, ready_for_new_session, select_plugin
-from app.scoring_registry import EvaluationContract, Registry
-from app.taskbank import Asset, TaskIdentity, TaskRevision
-from app.taskbank_excel import create_template
-from app.teacher_api import get_audio_store
-from app.tts_attempt import TTSAttempt
-from app.tts_worker import run_audio, run_once
+from app.papers.publication import (
+    preflight_publication,
+    publish,
+    ready_for_new_session,
+    select_plugin,
+)
+from app.scoring.registry import EvaluationContract, Registry
+from app.taskbank.excel import create_template
+from app.taskbank.import_batch import ImportBatch
+from app.taskbank.models import Asset, TaskIdentity, TaskRevision
 
 
 def workbook(revision=1):
@@ -109,7 +114,7 @@ def make_registry():
 @pytest.fixture
 def context(db, tmp_path, monkeypatch):
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token-only")
-    monkeypatch.setattr("app.teacher_auth.load_dotenv", lambda: None)
+    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
     images, previews, audio = tmp_path / "images", tmp_path / "previews", tmp_path / "audio"
     app = make_app(db, images, previews)
     store = AudioStore(audio)

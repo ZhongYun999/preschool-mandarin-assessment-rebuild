@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from test_taskbank import CONTENT, write
 from test_taskbank_import import commit, xlsx
 
-from app.paper import (
+from app.papers.paper import (
     Paper,
     PaperEditConflict,
     PaperEntry,
@@ -25,7 +25,7 @@ from app.paper import (
     replace_entry,
     update_draft,
 )
-from app.taskbank import TaskBank, TaskIdentity, TaskRevision
+from app.taskbank.models import TaskBank, TaskIdentity, TaskRevision
 
 
 def draft(db, bank):

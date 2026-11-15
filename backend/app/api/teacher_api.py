@@ -16,14 +16,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.teacher_auth import require_teacher
 from app.database import create_database_engine
-from app.fixed_audio import AudioStore, FixedAudio, readiness
-from app.import_batch import ImportBatch
-from app.import_preview_store import PreviewCorrupt, PreviewNotFound, PreviewStore
-from app.paper import Paper, PaperEntry
-from app.taskbank import Asset, TaskBank, TaskIdentity, TaskRevision
-from app.taskbank_excel import create_template
-from app.taskbank_import import (
+from app.media.fixed_audio import AudioStore, FixedAudio, readiness
+from app.media.tts_attempt import TTSAttempt
+from app.media.tts_worker import authorize_retry
+from app.papers.paper import Paper, PaperEntry
+from app.taskbank.excel import create_template
+from app.taskbank.image_store import ImageStore
+from app.taskbank.import_batch import ImportBatch
+from app.taskbank.import_service import (
     SLOT_COLUMNS,
     ImportOperationConflict,
     InvalidImportPreview,
@@ -31,10 +33,8 @@ from app.taskbank_import import (
     commit_import,
     preview_import,
 )
-from app.taskbank_storage import ImageStore
-from app.teacher_auth import require_teacher
-from app.tts_attempt import TTSAttempt
-from app.tts_worker import authorize_retry
+from app.taskbank.models import Asset, TaskBank, TaskIdentity, TaskRevision
+from app.taskbank.preview_store import PreviewCorrupt, PreviewNotFound, PreviewStore
 
 router = APIRouter(prefix="/teacher", dependencies=[Depends(require_teacher)])
 

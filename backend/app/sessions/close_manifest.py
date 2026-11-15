@@ -15,10 +15,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from app.assessment_session import AssessmentSession, Attempt, SessionTask, _identity, _transaction
 from app.database import Base
-from app.paper import PaperEntry
-from app.submission import Submission
+from app.papers.paper import PaperEntry
+from app.sessions.assessment_session import (
+    AssessmentSession,
+    Attempt,
+    SessionTask,
+    _identity,
+    _transaction,
+)
+from app.sessions.submission import Submission
 
 
 class CloseManifest(Base):

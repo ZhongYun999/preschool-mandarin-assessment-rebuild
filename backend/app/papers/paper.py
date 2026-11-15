@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
-from app.taskbank import TaskIdentity, TaskRevision
+from app.taskbank.models import TaskIdentity, TaskRevision
 
 
 class Paper(Base):
@@ -185,7 +185,7 @@ def remove_entry(
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
     entry = _entry(session, paper_id, entry_id)
-    from app.fixed_audio import FixedAudio
+    from app.media.fixed_audio import FixedAudio
 
     for audio in session.scalars(select(FixedAudio).where(FixedAudio.paper_entry_id == entry_id)):
         session.delete(audio)
@@ -204,7 +204,7 @@ def replace_entry(
 ) -> None:
     paper = _lock_draft(session, paper_id, expected_version)
     entry = _entry(session, paper_id, entry_id)
-    from app.fixed_audio import FixedAudio
+    from app.media.fixed_audio import FixedAudio
 
     for audio in session.scalars(select(FixedAudio).where(FixedAudio.paper_entry_id == entry_id)):
         session.delete(audio)
@@ -237,7 +237,7 @@ def reorder_entries(
 
 
 def copy_paper(session: Session, *, source_id: UUID) -> Paper:
-    from app.fixed_audio import FixedAudio
+    from app.media.fixed_audio import FixedAudio
 
     if session.connection().get_isolation_level() != "READ COMMITTED":
         raise ValueError("Paper copying requires READ COMMITTED isolation")

@@ -16,8 +16,8 @@ from uuid import UUID, uuid4
 
 from fastapi.encoders import jsonable_encoder
 
-from app.taskbank_excel import Issue
-from app.taskbank_import import Baseline, ImportPreview, RowPreview
+from app.taskbank.excel import Issue
+from app.taskbank.import_service import Baseline, ImportPreview, RowPreview
 
 
 class PreviewNotFound(Exception):
@@ -33,7 +33,7 @@ class PreviewStore:
         self.root = (
             Path(root)
             if root is not None
-            else Path(__file__).resolve().parents[2] / "uploads" / "import-previews"
+            else Path(__file__).resolve().parents[3] / "uploads" / "import-previews"
         )
 
     def save(self, workbook: bytes, preview: ImportPreview) -> str:

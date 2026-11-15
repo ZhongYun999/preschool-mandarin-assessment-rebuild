@@ -1,16 +1,10 @@
 from alembic import context
 
-from app import (
-    assessment_session,  # noqa: F401
-    close_manifest,  # noqa: F401
-    fixed_audio,  # noqa: F401
-    import_batch,  # noqa: F401
-    paper,  # noqa: F401
-    submission,  # noqa: F401
-    taskbank,  # noqa: F401
-    tts_attempt,  # noqa: F401
-)
 from app.database import Base, create_database_engine
+from app.media import fixed_audio, tts_attempt  # noqa: F401
+from app.papers import paper  # noqa: F401
+from app.sessions import assessment_session, close_manifest, submission  # noqa: F401
+from app.taskbank import import_batch, models  # noqa: F401
 
 config = context.config
 target_metadata = Base.metadata

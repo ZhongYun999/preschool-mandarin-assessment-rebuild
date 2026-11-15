@@ -16,12 +16,18 @@ from test_paper import draft
 from test_publication import TEST_AUDIO_CONFIG, TestPlugin
 from test_taskbank import CONTENT, write
 
-from app.assessment_session import Attempt, SessionTask, ordered_tasks, redo_attempt, start_attempt
-from app.fixed_audio import AudioStore, prepare_audio
-from app.paper import add_entry
-from app.publication import publish, select_plugin
-from app.scoring_registry import EvaluationContract, Registry
-from app.submission import (
+from app.media.fixed_audio import AudioStore, prepare_audio
+from app.papers.paper import add_entry
+from app.papers.publication import publish, select_plugin
+from app.scoring.registry import EvaluationContract, Registry
+from app.sessions.assessment_session import (
+    Attempt,
+    SessionTask,
+    ordered_tasks,
+    redo_attempt,
+    start_attempt,
+)
+from app.sessions.submission import (
     EvaluationIntent,
     Playback,
     Submission,

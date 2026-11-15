@@ -17,7 +17,10 @@ from test_fixed_audio import Synth, published
 from test_publication import registry, setup_paper
 from test_taskbank import CONTENT, write
 
-from app.assessment_session import (
+from app.media.fixed_audio import AudioStore, FixedAudio, prepare_audio
+from app.papers.paper import PaperEntry
+from app.scoring.registry import Registry
+from app.sessions.assessment_session import (
     AssessmentSession,
     Attempt,
     SessionTask,
@@ -26,9 +29,6 @@ from app.assessment_session import (
     redo_attempt,
     start_attempt,
 )
-from app.fixed_audio import AudioStore, FixedAudio, prepare_audio
-from app.paper import PaperEntry
-from app.scoring_registry import Registry
 
 
 @pytest.fixture

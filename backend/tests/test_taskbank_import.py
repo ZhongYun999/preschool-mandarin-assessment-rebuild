@@ -11,17 +11,17 @@ from PIL import Image as PillowImage
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.import_batch import ImportBatch
-from app.taskbank import (
+from app.taskbank.excel import create_template, preflight_xlsx
+from app.taskbank.image_store import ImageStore
+from app.taskbank.import_batch import ImportBatch
+from app.taskbank.import_service import commit_import, preview_import
+from app.taskbank.models import (
     Asset,
     TaskBank,
     TaskIdentity,
     TaskRevision,
     append_revision,
 )
-from app.taskbank_excel import create_template, preflight_xlsx
-from app.taskbank_import import commit_import, preview_import
-from app.taskbank_storage import ImageStore
 
 
 def picture(color):
@@ -136,7 +136,7 @@ def test_stale_baseline_rejected(db, bank, tmp_path, change):
 
 
 def test_mid_batch_failure_rolls_back_all_database_changes(db, bank, tmp_path, monkeypatch):
-    import app.taskbank_import as module
+    import app.taskbank.import_service as module
 
     data = xlsx(second=True)
     p = preview(db, bank, data)

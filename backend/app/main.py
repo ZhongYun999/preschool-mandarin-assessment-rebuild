@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.teacher_api import router as teacher_router
+from app.api.teacher_api import router as teacher_router
 
 app = FastAPI(title="VNext Assessment API")
 app.include_router(teacher_router)

@@ -8,12 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_fixed_audio import Synth, published, wav
 
-from app.dashscope_tts import DashScopeSynthesizer, TTSError
-from app.fixed_audio import AudioStore, FixedAudio, validate_config
+from app.api.teacher_api import get_audio_store, get_db
 from app.main import app
-from app.teacher_api import get_audio_store, get_db
-from app.tts_attempt import TTSAttempt
-from app.tts_worker import authorize_retry, run_audio
+from app.media.dashscope_tts import DashScopeSynthesizer, TTSError
+from app.media.fixed_audio import AudioStore, FixedAudio, validate_config
+from app.media.tts_attempt import TTSAttempt
+from app.media.tts_worker import authorize_retry, run_audio
 
 CONFIG = {
     "provider": "dashscope",
@@ -144,7 +144,7 @@ def test_teacher_status_trigger_retry_and_preview(db, bank, tmp_path, monkeypatc
         s.add(TTSAttempt(audio_id=audio_id, state="SENDING"))
     run_audio(db, audio_id, store, Synth())
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token")
-    monkeypatch.setattr("app.teacher_auth.load_dotenv", lambda: None)
+    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
 
     def override_db():
         with Session(db) as s:
