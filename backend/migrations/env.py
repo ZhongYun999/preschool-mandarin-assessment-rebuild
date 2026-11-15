@@ -1,6 +1,14 @@
 from alembic import context
 
-from app import assessment_session, fixed_audio, import_batch, paper, taskbank, tts_attempt  # noqa: F401
+from app import (
+    assessment_session,  # noqa: F401
+    fixed_audio,  # noqa: F401
+    import_batch,  # noqa: F401
+    paper,  # noqa: F401
+    submission,  # noqa: F401
+    taskbank,  # noqa: F401
+    tts_attempt,  # noqa: F401
+)
 from app.database import Base, create_database_engine
 
 config = context.config
