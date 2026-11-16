@@ -30,6 +30,8 @@ class EvaluationContract:
     task_types: frozenset[str]
     validate_parameters: Callable[[Mapping[str, Any]], bool]
     review_recommendation: Callable[[Mapping[str, Any]], bool] | bool | None = None
+    recognition_result: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
+    accepts_no_text: bool | None = None
 
 
 class Registry:
@@ -39,6 +41,12 @@ class Registry:
         self._plugins = {(p.plugin_id, p.implementation_version): p for p in plugins}
         self._contracts = {(c.source, c.version): c for c in contracts}
         self._requirements = {}
+        if any(
+            (c.recognition_result is not None and not callable(c.recognition_result))
+            or (c.accepts_no_text is not None and type(c.accepts_no_text) is not bool)
+            for c in contracts
+        ):
+            raise ValueError("Invalid recognition dependency contract")
         if len(self._plugins) != len(plugins) or len(self._contracts) != len(contracts):
             raise ValueError("Duplicate registry identity")
         for plugin in plugins:
@@ -65,7 +73,10 @@ class Registry:
         return set(json.loads(self._requirements[(plugin_id, version)]))
 
     def supports(self, task_type: str, requirement: Mapping[str, Any]) -> bool:
-        if set(requirement) != {"source", "version", "parameters"}:
+        if set(requirement) not in (
+            {"source", "version", "parameters"},
+            {"source", "version", "parameters", "depends_on"},
+        ):
             return False
         source, version, params = (
             requirement["source"],
@@ -79,11 +90,81 @@ class Registry:
         ):
             return False
         contract = self._contracts.get((source, version))
+        if (
+            contract is None
+            or task_type not in contract.task_types
+            or not contract.validate_parameters(params)
+        ):
+            return False
+        dependent = "depends_on" in requirement
         return (
-            contract is not None
-            and task_type in contract.task_types
-            and contract.validate_parameters(params)
+            (type(contract.accepts_no_text) is bool)
+            if dependent
+            else contract.accepts_no_text is None
         )
+
+    def valid_dependency(self, task_type: str, requirements: list, index: int) -> bool:
+        req = requirements[index]
+        if "depends_on" not in req:
+            return True
+        ref = req["depends_on"]
+        if (
+            not isinstance(ref, dict)
+            or set(ref) != {"requirement_index", "source", "version"}
+            or type(ref["requirement_index"]) is not int
+            or not isinstance(ref["source"], str)
+            or not isinstance(ref["version"], str)
+        ):
+            return False
+        upstream_index = ref["requirement_index"]
+        if upstream_index < 0 or upstream_index >= len(requirements) or upstream_index == index:
+            return False
+        upstream = requirements[upstream_index]
+        if (
+            not isinstance(upstream, dict)
+            or "depends_on" in upstream
+            or (upstream.get("source"), upstream.get("version")) != (ref["source"], ref["version"])
+            or not self.supports(task_type, upstream)
+        ):
+            return False
+        contract = self._contracts.get((ref["source"], ref["version"]))
+        return contract is not None and callable(contract.recognition_result)
+
+    def valid_plan(self, task_type: str, requirements: Any) -> bool:
+        return isinstance(requirements, list) and all(
+            isinstance(req, dict)
+            and self.supports(task_type, req)
+            and self.valid_dependency(task_type, requirements, index)
+            for index, req in enumerate(requirements)
+        )
+
+    def recognition_contract(self, requirement: Mapping[str, Any]) -> bool:
+        contract = self._contracts.get((requirement["source"], requirement["version"]))
+        return bool(contract and contract.recognition_result is not None)
+
+    def recognition_result(
+        self, requirement: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> dict:
+        contract = self._contracts[(requirement["source"], requirement["version"])]
+        result = contract.recognition_result(payload)
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"status", "text"}
+            or not (
+                (
+                    result["status"] == "TEXT"
+                    and isinstance(result["text"], str)
+                    and result["text"].strip()
+                )
+                or (result["status"] == "NO_TEXT" and result["text"] is None)
+            )
+        ):
+            raise ValueError("Invalid recognition result")
+        return result
+
+    def accepts_no_text(self, requirement: Mapping[str, Any]) -> bool:
+        contract = self._contracts[(requirement["source"], requirement["version"])]
+        return contract.accepts_no_text is True
 
     def review_recommendation(
         self, requirement: Mapping[str, Any], payload: Mapping[str, Any]

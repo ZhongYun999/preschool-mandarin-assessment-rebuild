@@ -129,6 +129,8 @@ def preflight_publication(
             for req in requirements:
                 if not isinstance(req, dict) or not registry.supports(revision.task_type, req):
                     errors.append("Evaluation contract is unavailable or incompatible")
+            if not registry.valid_plan(revision.task_type, requirements):
+                errors.append("Evaluation dependency plan is invalid")
             audio = {"prompt": revision.prompt_text}
             if not revision.prompt_text:
                 errors.append("Prompt audio text is missing")
