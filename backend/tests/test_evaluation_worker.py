@@ -390,7 +390,7 @@ def test_downgrade_refuses_existing_evidence(db, context):
             command.downgrade(config, "0011_session_task_identity")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM raw_evaluations")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0016_session_credentials"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0017_credential_revocation"
 
 
 def test_retry_rejects_changed_resolved_input_identity(db, context):

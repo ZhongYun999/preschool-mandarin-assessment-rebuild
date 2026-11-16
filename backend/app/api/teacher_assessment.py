@@ -2,12 +2,13 @@
 
 import hashlib
 import secrets
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_audio_store, get_db
@@ -69,6 +70,7 @@ class TokenRequest(BaseModel):
 
 
 class TokenIssued(BaseModel):
+    credential_id: UUID
     session_id: UUID
     token: str
     token_type: str = "Bearer"
@@ -152,6 +154,7 @@ def issue_access_token(
     db: Session = db_dependency,
 ):
     with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         owner = db.scalar(
             select(AssessmentSession)
             .where(AssessmentSession.session_id == session_id)
@@ -160,15 +163,99 @@ def issue_access_token(
         if owner is None:
             raise HTTPException(status_code=404, detail="Session not found")
         token = "as1_" + secrets.token_urlsafe(32)
-        db.add(
-            SessionCredential(
-                credential_id=uuid4(),
-                session_id=session_id,
-                token_digest=hashlib.sha256(token.encode("ascii")).digest(),
-            )
+        credential = SessionCredential(
+            credential_id=uuid4(),
+            session_id=session_id,
+            token_digest=hashlib.sha256(token.encode("ascii")).digest(),
         )
+        db.add(credential)
         db.flush()
-        result = TokenIssued(session_id=session_id, token=token)
+        result = TokenIssued(
+            credential_id=credential.credential_id, session_id=session_id, token=token
+        )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return result
+
+
+class CredentialMetadata(BaseModel):
+    credential_id: UUID
+    issued_at: datetime
+    revoked_at: datetime | None
+    active: bool
+
+
+def _lock_owner(db: Session, session_id: UUID) -> None:
+    owner = db.scalar(
+        select(AssessmentSession.session_id)
+        .where(AssessmentSession.session_id == session_id)
+        .with_for_update()
+    )
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _metadata(row: SessionCredential) -> CredentialMetadata:
+    return CredentialMetadata(
+        credential_id=row.credential_id,
+        issued_at=row.issued_at,
+        revoked_at=row.revoked_at,
+        active=row.revoked_at is None,
+    )
+
+
+@router.get("/sessions/{session_id}/access-tokens", response_model=list[CredentialMetadata])
+def list_access_tokens(session_id: UUID, response: Response, db: Session = db_dependency):
+    if db.get(AssessmentSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    rows = db.scalars(
+        select(SessionCredential)
+        .where(SessionCredential.session_id == session_id)
+        .order_by(SessionCredential.issued_at, SessionCredential.credential_id)
+    ).all()
+    response.headers["Cache-Control"] = "no-store"
+    return [_metadata(row) for row in rows]
+
+
+@router.post(
+    "/sessions/{session_id}/access-tokens/{credential_id}/revoke", response_model=CredentialMetadata
+)
+def revoke_access_token(
+    session_id: UUID, credential_id: UUID, response: Response, db: Session = db_dependency
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        _lock_owner(db, session_id)
+        row = db.scalar(
+            select(SessionCredential)
+            .where(
+                SessionCredential.session_id == session_id,
+                SessionCredential.credential_id == credential_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Credential not found")
+        if row.revoked_at is None:
+            row.revoked_at = db.scalar(select(func.clock_timestamp()))
+            db.flush()
+        result = _metadata(row)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.post("/sessions/{session_id}/access-tokens/revoke-all")
+def revoke_all_access_tokens(session_id: UUID, response: Response, db: Session = db_dependency):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        _lock_owner(db, session_id)
+        ids = db.scalars(
+            update(SessionCredential)
+            .where(
+                SessionCredential.session_id == session_id, SessionCredential.revoked_at.is_(None)
+            )
+            .values(revoked_at=func.clock_timestamp())
+            .returning(SessionCredential.credential_id)
+        ).all()
+    response.headers["Cache-Control"] = "no-store"
+    return {"revoked_count": len(ids)}

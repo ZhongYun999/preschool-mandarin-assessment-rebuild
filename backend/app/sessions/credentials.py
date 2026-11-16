@@ -28,6 +28,7 @@ class SessionCredential(Base):
         ForeignKey("assessment_sessions.session_id"), nullable=False, index=True
     )
     token_digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
