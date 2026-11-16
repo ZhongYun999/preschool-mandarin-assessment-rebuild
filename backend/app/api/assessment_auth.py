@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_db
 from app.api.teacher_auth import bearer
+from app.sessions.assessment_session import AssessmentSession
 from app.sessions.credentials import SessionCredential
 
 TOKEN_PATTERN = re.compile(r"as1_[A-Za-z0-9_-]{43}\Z")
@@ -29,14 +30,16 @@ def _check_access(
     digest = hashlib.sha256(credentials.credentials.encode("ascii")).digest()
     found = db.scalar(
         select(SessionCredential.credential_id).where(
-            SessionCredential.session_id == session_id, SessionCredential.token_digest == digest
+            SessionCredential.session_id == session_id,
+            SessionCredential.token_digest == digest,
+            SessionCredential.revoked_at.is_(None),
         )
     )
     if found is None:
         raise HTTPException(
             status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Bearer"}
         )
-    return session_id
+    return found
 
 
 def require_session_access(
@@ -44,7 +47,7 @@ def require_session_access(
     credentials: HTTPAuthorizationCredentials | None = credential_dependency,
     db: Session = write_auth_db_dependency,
 ) -> UUID:
-    """Reusable session authorization for future assessment actions."""
+    """Return a credential ID for confirmation in the business transaction."""
     return _check_access(session_id, credentials, db)
 
 
@@ -61,4 +64,31 @@ def require_read_session_access(
     credentials: HTTPAuthorizationCredentials | None = credential_dependency,
     db: Session = read_db_dependency,
 ) -> UUID:
-    return _check_access(session_id, credentials, db)
+    _check_access(session_id, credentials, db)
+    return session_id
+
+
+def confirm_write_access(db: Session, session_id: UUID, credential_id: UUID) -> None:
+    """Serialize authorization with issuance and revocation in the business transaction."""
+    owner = db.scalar(
+        select(AssessmentSession.session_id)
+        .where(AssessmentSession.session_id == session_id)
+        .with_for_update()
+    )
+    credential = (
+        db.scalar(
+            select(SessionCredential.credential_id)
+            .where(
+                SessionCredential.session_id == session_id,
+                SessionCredential.credential_id == credential_id,
+                SessionCredential.revoked_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if owner is not None
+        else None
+    )
+    if credential is None:
+        raise HTTPException(
+            status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Bearer"}
+        )

@@ -325,7 +325,7 @@ def test_downgrade_preserves_close(db, context):
         assert c.scalar(text("SELECT count(*) FROM close_manifests")) == 1
         assert (
             c.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0016_session_credentials"
+            == "0017_credential_revocation"
         )
 
 

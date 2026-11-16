@@ -104,7 +104,11 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 共享管理凭据可调用 `POST /teacher/assessment/sessions`，提交 `paper_id`、稳定的 `create_request_id` 和 V1 `review_policy` 创建 Session。重复创建请求返回同一 Session，不签发或改变访问凭据；不同参数复用请求标识会冲突。新 Session 必须使用可解释的 V1 复核策略，既有历史策略的幂等重传保持原样。
 
-管理方调用 `POST /teacher/assessment/sessions/{session_id}/access-token` 明确签发高熵 Session Bearer Token。明文只在这次响应中返回，数据库仅保存摘要，响应禁止缓存；通过受控渠道将 Token 交给施测端，不将其写入 URL、日志或仓库。每次调用都是**追加签发**：之前的 Token 继续有效，不隐式轮换或限制设备数量。若响应丢失或 Token 遗失，管理方再次签发新的 Token；数据库无法恢复旧明文。当前没有撤销单个 Token 的接口，泄漏凭据的撤销方案需另行实现。
+管理方调用 `POST /teacher/assessment/sessions/{session_id}/access-token` 明确签发高熵 Session Bearer Token。明文只在这次响应中返回，数据库仅保存摘要，响应禁止缓存；通过受控渠道将 Token 交给施测端，不将其写入 URL、日志或仓库。每次调用都是**追加签发**：之前的 Token 继续有效，不隐式轮换或限制设备数量。若响应丢失或 Token 遗失，管理方再次签发新的 Token；数据库无法恢复旧明文。签发响应包含 `credential_id`，用于管理该凭据。
+
+凭据泄漏时，管理方使用共享管理凭据调用 `GET /teacher/assessment/sessions/{session_id}/access-tokens` 查询凭据身份、签发与撤销时间和有效状态；响应不包含 Token 或摘要。确认单个泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/{credential_id}/revoke` 撤销；无法识别泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/revoke-all` 撤销该场所有当前有效凭据。两种撤销均可重复调用。随后可显式追加签发新 Token，并通过安全渠道交付给施测端。
+
+撤销只改变后续访问资格，不重置 Session 或作答进度；新凭据可恢复原有 Attempt 与 Submission。撤销不会取消已经完成认证并开始读取的在途只读请求，也无法删除客户端下载的资源。不要将 Token 或摘要写入 URL、日志或仓库。
 
 施测端使用对应 Token 调用 `GET /assessment/sessions/{session_id}`，返回当前 Attempt、是否有当前 Submission、可用业务动作及关闭／正式成绩状态。Session Token 不能用于其他 Session 或教师管理接口。所有施测请求（包括音频和图片）通过 `Authorization: Bearer <token>` 传递凭据，不使用 URL 查询参数；响应中的资源路径也需要携带同一凭据。
 

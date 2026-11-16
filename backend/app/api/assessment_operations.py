@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.assessment_auth import (
     assessment_read_db,
+    confirm_write_access,
     require_read_session_access,
     require_session_access,
 )
@@ -215,6 +216,7 @@ def current_attempt(
 def begin(session_id: UUID, task_id: UUID, _auth: UUID = write_auth, db: Session = write_db):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
             return attempt_view(start_attempt(db, session_id=session_id, session_task_id=task_id))
@@ -232,6 +234,7 @@ def playback_start(
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
             row = start_playback(
@@ -253,6 +256,7 @@ def playback_finish(
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
             row = finish_playback(
@@ -277,6 +281,7 @@ def submit(
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
             row = submit_instruction(
@@ -301,6 +306,7 @@ def redo(
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
             return attempt_view(
@@ -316,6 +322,7 @@ def redo(
 def close(session_id: UUID, body: CloseInput, _auth: UUID = write_auth, db: Session = write_db):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
         try:
             row = close_session(db, session_id=session_id, **body.model_dump())
             return {"manifest_id": row.manifest_id, "status": "INPUT_CLOSED"}
