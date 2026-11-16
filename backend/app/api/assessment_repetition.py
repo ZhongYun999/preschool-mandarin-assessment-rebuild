@@ -1,4 +1,4 @@
-"""Session-authorized repetition recording endpoints."""
+"""Session-authorized simple recording and submission endpoints."""
 
 import hashlib
 import os
@@ -22,12 +22,9 @@ from app.api.teacher_api import get_db
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, Attempt
-from app.task_types.repetition import (
-    cancel_recording,
-    save_recording,
-    start_recording,
-    submit_repetition,
-)
+from app.task_types.qa import submit_qa
+from app.task_types.repetition import submit_repetition
+from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
 
 router = APIRouter(prefix="/assessment/sessions/{session_id}/tasks/{task_id}")
 read_auth = Depends(require_read_session_access)
@@ -55,7 +52,7 @@ class RecordingCancel(BaseModel):
     attempt_id: UUID
 
 
-class RepetitionSubmit(BaseModel):
+class RecordingSubmit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     attempt_id: UUID
     recording_id: UUID
@@ -130,7 +127,7 @@ def _preflight_upload(db, session_id, task_id, attempt_id, recording_id):
         owner = db.get(AssessmentSession, session_id)
         if (
             owner.status != "IN_PROGRESS"
-            or revision.task_type != "repetition"
+            or revision.task_type not in ("repetition", "qa")
             or task.current_attempt_id != attempt_id
             or attempt is None
             or attempt.status != "OPEN"
@@ -226,7 +223,7 @@ def list_recordings(
     db: Session = read_db,
 ):
     task, _, revision = task_row(db, session_id, task_id)
-    if revision.task_type != "repetition":
+    if revision.task_type not in ("repetition", "qa"):
         raise HTTPException(404, "Recordings not available")
     rows = (
         []
@@ -260,7 +257,7 @@ def recording_content(
             Recording.status == "SAVED",
         )
     )
-    if revision.task_type != "repetition" or row is None:
+    if revision.task_type not in ("repetition", "qa") or row is None:
         raise HTTPException(404, "Recording not found")
     try:
         data = store.read(row.storage_ref, row.sha256)
@@ -269,21 +266,13 @@ def recording_content(
     return Response(data, media_type=row.media_type, headers={"Cache-Control": "no-store"})
 
 
-@router.post("/submissions/repetition")
-def submit(
-    session_id: UUID,
-    task_id: UUID,
-    body: RepetitionSubmit,
-    _auth: UUID = write_auth,
-    db: Session = write_db,
-    store: RecordingStore = recording_store,
-):
+def _submit_recording(db, session_id, task_id, body, credential_id, store, handler):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
-        confirm_write_access(db, session_id, _auth)
+        confirm_write_access(db, session_id, credential_id)
         task_row(db, session_id, task_id)
         try:
-            row = submit_repetition(
+            row = handler(
                 db, session_id=session_id, session_task_id=task_id, store=store, **body.model_dump()
             )
             return {
@@ -293,3 +282,27 @@ def submit(
             }
         except ValueError as exc:
             conflict(exc)
+
+
+@router.post("/submissions/repetition")
+def submit(
+    session_id: UUID,
+    task_id: UUID,
+    body: RecordingSubmit,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+    store: RecordingStore = recording_store,
+):
+    return _submit_recording(db, session_id, task_id, body, _auth, store, submit_repetition)
+
+
+@router.post("/submissions/qa")
+def submit_qa_answer(
+    session_id: UUID,
+    task_id: UUID,
+    body: RecordingSubmit,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+    store: RecordingStore = recording_store,
+):
+    return _submit_recording(db, session_id, task_id, body, _auth, store, submit_qa)

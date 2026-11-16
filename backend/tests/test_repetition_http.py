@@ -318,7 +318,7 @@ def test_redo_isolates_old_recording_and_close(db, client, repetition):
         == 200
     )
     assert start_rec(client, f, new, request="after").status_code == 409
-    assert submit_http(client, f, new, new_rec, request="new").status_code == 409
+    assert submit_http(client, f, new, new_rec, request="new").json()["submission_id"] == accepted
     with Session(db) as s:
         chosen = {str(x) for x in s.scalars(select(CloseManifestEntry.submission_id))}
         assert old not in chosen and accepted in chosen
