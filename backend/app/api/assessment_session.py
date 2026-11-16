@@ -31,6 +31,7 @@ class TaskState(BaseModel):
     submission_exists: bool
     guide_complete: bool
     initial_prompt_complete: bool
+    playback_in_progress: bool
     recording_in_progress: bool
     saved_recording_ids: list[UUID]
     allowed_actions: list[str]
@@ -117,7 +118,7 @@ def session_state(
         )
         recordings = (
             list(db.scalars(select(Recording).where(Recording.attempt_id == attempt.attempt_id)))
-            if attempt and task_type == "repetition"
+            if attempt and task_type in ("repetition", "qa")
             else []
         )
         recording_in_progress = any(r.status == "STARTED" for r in recordings)
@@ -126,20 +127,23 @@ def session_state(
             attempt and (not guide_text or _completed(db, attempt.attempt_id, "GUIDE"))
         )
         initial_complete = bool(attempt and _completed(db, attempt.attempt_id, "INITIAL_PROMPT"))
+        playback_in_progress = bool(attempt and _busy(db, attempt.attempt_id))
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
                 actions = ["START_ATTEMPT"]
-            elif attempt.status == "OPEN" and task_type in ("instruction", "repetition"):
-                if task_type == "repetition" and recording_in_progress:
+            elif attempt.status == "OPEN" and task_type in ("instruction", "repetition", "qa"):
+                if task_type in ("repetition", "qa") and recording_in_progress:
                     actions = ["UPLOAD_RECORDING", "CANCEL_RECORDING", "REDO_ATTEMPT"]
                 else:
                     actions = _instruction_actions(db, attempt, guide_text, task.paper_entry_id)
-                    if task_type == "repetition" and "SUBMIT_INSTRUCTION" in actions:
+                    if task_type in ("repetition", "qa") and "SUBMIT_INSTRUCTION" in actions:
                         actions.remove("SUBMIT_INSTRUCTION")
                         actions.append("START_RECORDING")
                         if saved_recording_ids:
-                            actions.append("SUBMIT_REPETITION")
+                            actions.append(
+                                "SUBMIT_REPETITION" if task_type == "repetition" else "SUBMIT_QA"
+                            )
             else:
                 actions = ["REDO_ATTEMPT"]
         tasks.append(
@@ -153,6 +157,7 @@ def session_state(
                 submission_exists=submission,
                 guide_complete=guide_complete,
                 initial_prompt_complete=initial_complete,
+                playback_in_progress=playback_in_progress,
                 recording_in_progress=recording_in_progress,
                 saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,

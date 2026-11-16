@@ -174,9 +174,9 @@ def start_playback(
             raise ValueError("Playback request conflicts")
         return previous
     revision = _revision(session, task)
-    if revision.task_type not in ("instruction", "repetition"):
+    if revision.task_type not in ("instruction", "repetition", "qa"):
         raise ValueError("Unsupported task type")
-    if revision.task_type == "repetition" and recording_busy(session, attempt_id):
+    if revision.task_type in ("repetition", "qa") and recording_busy(session, attempt_id):
         raise ValueError("Recording in progress")
     if _busy(session, attempt_id):
         raise ValueError("Playback in progress")

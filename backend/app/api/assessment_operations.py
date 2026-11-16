@@ -104,7 +104,7 @@ def content(
     db: Session = read_db,
 ):
     task, entry, revision = task_row(db, session_id, task_id)
-    if revision.task_type not in ("instruction", "repetition"):
+    if revision.task_type not in ("instruction", "repetition", "qa"):
         raise HTTPException(404, "Content not available")
     base = f"/assessment/sessions/{session_id}/tasks/{task_id}"
     audio = {
