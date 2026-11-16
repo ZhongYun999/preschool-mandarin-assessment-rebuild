@@ -5,7 +5,7 @@ from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from test_assessment_http import access, create_body, issue
 from test_fixed_audio import Synth
@@ -21,6 +21,7 @@ from app.api.teacher_review import get_scoring_registry
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.worker import (
     AdapterResult,
+    InputIdentityConflict,
     InputSnapshot,
     KnownFailure,
     authorize_retry,
@@ -433,6 +434,119 @@ def test_llm_expired_claim_preserves_frozen_upstream_and_rejects_changed_input(
     second.inputs.payload["asr"]["text"] = "transcribed words"
     assert execute_claim(db, second)
     assert llm.calls == 1
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_input_conflict_isolated_and_scan_fair_after_restart(db, dependency_flow, batch_size):
+    from app.evaluation.worker import recover_expired
+
+    f = dependency_flow()
+    asr, llm, acoustic, sources = adapters(f)
+    first = claim(db, f, "test-asr", sources)
+    assert first is not None
+    with Session(db) as s:
+        job = s.get(EvaluationJob, f["jobs"]["test-asr"])
+        refs, fingerprint = job.input_refs, job.input_fingerprint
+    with db.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE evaluation_jobs SET lease_until = clock_timestamp() - interval '1 second' "
+                "WHERE job_id = :id"
+            ),
+            {"id": f["jobs"]["test-asr"]},
+        )
+    with Session(db) as s, s.begin():
+        assert recover_expired(s) == 1
+    with db.begin() as connection:
+        for source, seconds in (("test-asr", 30), ("test-acoustic", 20), ("test-llm", 10)):
+            connection.execute(
+                text(
+                    "UPDATE evaluation_jobs SET last_checked_at = "
+                    "clock_timestamp() - (:seconds * interval '1 second') WHERE job_id = :id"
+                ),
+                {"id": f["jobs"][source], "seconds": seconds},
+            )
+    with Session(db) as s:
+        old_checked = s.get(EvaluationJob, f["jobs"]["test-asr"]).last_checked_at
+
+    resolve = asr.resolve_inputs
+
+    def mismatch(resolver):
+        def changed(db_session, submission, revision, requirement):
+            snapshot = resolver(db_session, submission, revision, requirement)
+            snapshot.payload["media_type"] = "changed"
+            return snapshot
+
+        return changed
+
+    asr.resolve_inputs = mismatch(resolve)
+    result = run_once(
+        db,
+        registry=f["registry"],
+        adapters=sources,
+        lease=timedelta(minutes=1),
+        batch_size=batch_size,
+    )
+    assert result["claimed"] == batch_size - 1
+    assert result["finished"] == batch_size - 1
+    with Session(db) as s:
+        job = s.get(EvaluationJob, f["jobs"]["test-asr"])
+        assert job.status == "WAITING" and job.error_code == "INPUT_IDENTITY_CONFLICT"
+        assert job.last_checked_at > old_checked
+        assert job.input_refs == refs and job.input_fingerprint == fingerprint
+        assert s.scalar(select(RawEvaluation).where(RawEvaluation.job_id == job.job_id)) is None
+        existing_raws = {
+            raw.evaluation_id: (raw.status, raw.input_refs, raw.input_fingerprint, raw.payload)
+            for raw in s.scalars(select(RawEvaluation))
+        }
+    assert asr.calls == 0 and acoustic.calls == batch_size - 1
+    with pytest.raises(InputIdentityConflict):
+        claim(db, f, "test-asr", sources)
+    with Session(db) as s:
+        assert {
+            raw.evaluation_id: (raw.status, raw.input_refs, raw.input_fingerprint, raw.payload)
+            for raw in s.scalars(select(RawEvaluation))
+        } == existing_raws
+
+    if batch_size == 1:
+        # Dispose connections and rebuild worker dependencies to model a restart.
+        db.dispose()
+        _, registry = make_registry([LLM, ACOUSTIC, ASR])
+        asr, llm, acoustic, sources = adapters(f)
+        resolve = asr.resolve_inputs
+        asr.resolve_inputs = mismatch(resolve)
+        result = run_once(
+            db, registry=registry, adapters=sources, lease=timedelta(minutes=1), batch_size=1
+        )
+        assert result["claimed"] == result["finished"] == 1
+    assert acoustic.calls == 1 and asr.calls == llm.calls == 0
+    with Session(db) as s:
+        job = s.get(EvaluationJob, f["jobs"]["test-asr"])
+        assert job.input_refs == refs and job.input_fingerprint == fingerprint
+        assert s.scalar(select(RawEvaluation).where(RawEvaluation.job_id == job.job_id)) is None
+
+    asr.resolve_inputs = resolve
+    for _ in range(2):
+        run_once(
+            db, registry=f["registry"], adapters=sources, lease=timedelta(minutes=1), batch_size=10
+        )
+    assert (asr.calls, llm.calls, acoustic.calls) == (1, 1, 1)
+    assert len(run_settlement_once(db, registry=f["registry"])["completed"]) == 1
+    with Session(db) as s:
+        raw_ids = set(s.scalars(select(RawEvaluation.evaluation_id)))
+        result_ids = set(s.scalars(select(FinalScoreResult.result_id)))
+        assert len(raw_ids) == 3 and len(result_ids) == 1
+    assert (
+        run_once(
+            db, registry=f["registry"], adapters=sources, lease=timedelta(minutes=1), batch_size=10
+        )["claimed"]
+        == 0
+    )
+    run_settlement_once(db, registry=f["registry"])
+    with Session(db) as s:
+        assert set(s.scalars(select(RawEvaluation.evaluation_id))) == raw_ids
+        assert set(s.scalars(select(FinalScoreResult.result_id))) == result_ids
+    assert (asr.calls, llm.calls, acoustic.calls) == (1, 1, 1)
 
 
 def test_concurrent_asr_claim_and_waiting_llm(db, dependency_flow):

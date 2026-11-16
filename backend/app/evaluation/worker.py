@@ -408,6 +408,7 @@ def claim_job(
                 job, _, current = context
                 if current and job.status == "WAITING":
                     job.error_code = "INPUT_IDENTITY_CONFLICT"
+                    job.last_checked_at = session.scalar(select(func.clock_timestamp()))
                     session.flush()
         raise
 
@@ -614,7 +615,10 @@ def run_once(
         ).all()
     claimed = finished = 0
     for job_id in ids:
-        work = claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+        try:
+            work = claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+        except InputIdentityConflict:
+            continue
         if work is not None:
             claimed += 1
             finished += int(execute_claim(engine, work))
