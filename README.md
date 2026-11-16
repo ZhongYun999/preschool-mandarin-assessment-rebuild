@@ -129,7 +129,7 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 完成录音后，以原始二进制请求体向 `POST /tasks/{task_id}/recordings/{recording_id}/content` 上传，使用 `X-Attempt-Id` 标识 Attempt、`Content-Type: audio/wav` 等 `audio/*` 类型标识客户端实际媒体格式，并携带 Session Bearer Token。当前服务记录声明的媒体类型并校验非空内容与 SHA-256，尚未验证各客户端编码与后续评价供应商的兼容性，不将 WAV 固定为唯一格式。同一录音操作的相同字节与媒体类型可以重传；不同内容或类型会冲突。已保存音频可通过返回的受保护内容路径读取；上传完成不等于正式提交。
 
-跟读题使用 `POST /tasks/{task_id}/submissions/repetition`，问答题使用 `POST /tasks/{task_id}/submissions/qa`；两者均接受 `attempt_id`、`recording_id`、稳定 `submit_request_id`，验证各自题型、当前 Attempt、播放事实和录音文件后正式提交。播放和录音互斥；提交后可继续下一题，无须等待评价或转写。封卷后不接受新的作答或提交。Session 查询及录音查询可恢复服务端权威状态。
+跟读题使用 `POST /tasks/{task_id}/submissions/repetition`，问答题使用 `POST /tasks/{task_id}/submissions/qa`；两者均接受 `attempt_id`、`recording_id`、稳定 `submit_request_id`，验证各自题型、当前 Attempt、播放事实和录音文件后正式提交。播放和录音互斥；提交后可继续下一题，无须等待评价或转写。封卷后不接受新的作答或提交；已接受的相同提交请求仍可幂等重传。Session 查询及录音查询可恢复服务端权威状态。
 
 录音默认保存在私有 `uploads/recordings`，可通过 `RECORDING_ROOT` 指向受操作系统权限保护的私有持久目录，所有服务和评价 Worker 必须访问同一目录；不可公开静态托管。文件按内容摘要不可覆盖保存，数据库只记录引用及摘要；保存成功但数据库事务失败时可能留下未引用文件，当前没有自动清理。必要评价适配器根据 Submission 的录音身份核对所属 Attempt、读取并校验私有录音，再使用冻结题目版本和评价合同；未声明的评价来源不会调度。本轮不包含真实 ISE 适配器或生产媒体兼容性验收。
 

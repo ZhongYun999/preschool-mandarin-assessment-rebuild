@@ -125,8 +125,6 @@ def submit_recording(
 ):
     _identity(submit_request_id)
     task, attempt = _locked(db, session_id, session_task_id, attempt_id, allow_closed=True)
-    if db.get(AssessmentSession, session_id).status != "IN_PROGRESS":
-        raise ValueError("Session is not in progress")
     revision = _revision(db, task)
     if revision.task_type != task_type:
         raise ValueError("Unsupported task type")
@@ -142,6 +140,8 @@ def submit_recording(
         ):
             raise ValueError("Submission request conflicts")
         return existing
+    if db.get(AssessmentSession, session_id).status != "IN_PROGRESS":
+        raise ValueError("Session is not in progress")
     _open(task, attempt)
     if (
         (revision.guide_text and not _completed(db, attempt_id, "GUIDE"))

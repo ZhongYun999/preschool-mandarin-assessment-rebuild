@@ -438,7 +438,7 @@ def test_qa_failure_redo_and_cross_attempt(db, client, qa_flow):
         ).status_code
         == 200
     )
-    assert submit(client, f, new, second, request="new").status_code == 409
+    assert submit(client, f, new, second, request="new").json()["submission_id"] == final
     with Session(db) as s:
         selected = {str(x) for x in s.scalars(select(CloseManifestEntry.submission_id))}
         assert old not in selected and final in selected
