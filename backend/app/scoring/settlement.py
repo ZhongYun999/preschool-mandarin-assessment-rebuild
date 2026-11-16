@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.worker import _upstream_asr
 from app.papers.paper import EvaluationPlan, Paper, PaperEntry
 from app.scoring.models import (
     AutomaticPaperScore,
@@ -70,6 +71,17 @@ def _evidence(db, submission, entry, revision, plan, registry):
             or refs.get("task_revision_id") != str(revision.task_revision_id)
         ):
             raise ValueError("Evaluation evidence identity does not match frozen input")
+        if "depends_on" in requirement:
+            if not registry.valid_dependency(revision.task_type, plan.requirements, index):
+                raise ScoringUnavailable("Frozen evaluation dependency is unavailable")
+            upstream = _upstream_asr(db, job, submission, revision, plan, registry)
+            dependencies = refs.get("dependencies")
+            if (
+                upstream is None
+                or not isinstance(dependencies, dict)
+                or dependencies.get("asr") != upstream[0]
+            ):
+                raise ValueError("Evaluation dependency identity does not match frozen input")
         evidence.append(raw)
     return evidence
 

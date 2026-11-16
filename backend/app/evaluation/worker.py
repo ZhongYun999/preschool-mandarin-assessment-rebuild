@@ -21,6 +21,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.media.recording import Recording
 from app.papers.paper import EvaluationPlan, PaperEntry
 from app.scoring.registry import Registry
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
@@ -51,6 +52,10 @@ class Adapter(Protocol):
     def validate_result(self, result: AdapterResult, requirement: dict) -> bool: ...
 
 
+class InputIdentityConflict(ValueError):
+    """A previously frozen evaluation input cannot be safely reused."""
+
+
 class KnownFailure(Exception):
     """A classified failure whose external outcome is known."""
 
@@ -68,6 +73,7 @@ class Claim:
     inputs: InputSnapshot
     requirement: dict
     adapter: Adapter
+    registry: Registry
 
 
 def _json(value: Any) -> str:
@@ -98,7 +104,11 @@ def schedule(session: Session, *, limit: int | None = None) -> int:
         requirement = plan.requirements[intent.requirement_index]
         if (
             not isinstance(requirement, dict)
-            or set(requirement) != {"source", "version", "parameters"}
+            or set(requirement)
+            not in (
+                {"source", "version", "parameters"},
+                {"source", "version", "parameters", "depends_on"},
+            )
             or not isinstance(requirement["source"], str)
             or not isinstance(requirement["version"], str)
             or not isinstance(requirement["parameters"], dict)
@@ -202,7 +212,95 @@ def _skip(job: EvaluationJob) -> None:
     job.claim_token, job.lease_until = None, None
 
 
-def claim_job(
+def recording_input(session: Session, submission: Submission) -> dict:
+    """Resolve the frozen recording identity; adapters verify bytes outside the transaction."""
+    try:
+        recording_id = UUID(submission.inputs["recording_id"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise InputIdentityConflict("Submission recording identity is invalid") from exc
+    recording = session.get(Recording, recording_id)
+    if (
+        recording is None
+        or recording.attempt_id != submission.attempt_id
+        or recording.status != "SAVED"
+    ):
+        raise InputIdentityConflict("Submission recording identity is invalid")
+    return {
+        "recording_id": str(recording.recording_id),
+        "sha256": recording.sha256,
+        "media_type": recording.media_type,
+        "storage_ref": recording.storage_ref,
+    }
+
+
+def _recording_identity(session: Session, submission: Submission) -> dict:
+    recording = recording_input(session, submission)
+    return {key: recording[key] for key in ("recording_id", "sha256", "media_type")}
+
+
+def _upstream_asr(
+    session: Session,
+    job: EvaluationJob,
+    submission: Submission,
+    revision: TaskRevision,
+    plan: EvaluationPlan,
+    registry: Registry,
+):
+    dependency = job.requirement.get("depends_on")
+    if dependency is None:
+        return None
+    index = dependency["requirement_index"]
+    expected = plan.requirements[index]
+    upstream = session.scalar(
+        select(EvaluationJob).where(
+            EvaluationJob.submission_id == submission.submission_id,
+            EvaluationJob.paper_entry_id == job.paper_entry_id,
+            EvaluationJob.requirement_index == index,
+        )
+    )
+    if upstream is None or upstream.status != "READY":
+        return None
+    raw = session.scalar(
+        select(RawEvaluation).where(
+            RawEvaluation.job_id == upstream.job_id, RawEvaluation.status == "READY"
+        )
+    )
+    refs = upstream.input_refs or {}
+    recording = _recording_identity(session, submission)
+    if (
+        upstream.requirement != expected
+        or raw is None
+        or raw.submission_id != submission.submission_id
+        or raw.input_refs != upstream.input_refs
+        or raw.input_fingerprint != upstream.input_fingerprint
+        or refs.get("submission_id") != str(submission.submission_id)
+        or refs.get("paper_entry_id") != str(job.paper_entry_id)
+        or refs.get("task_revision_id") != str(revision.task_revision_id)
+        or not isinstance(refs.get("dependencies"), dict)
+        or any(refs["dependencies"].get(k) != v for k, v in recording.items())
+    ):
+        raise InputIdentityConflict("Upstream recognition evidence identity mismatch")
+    result = registry.recognition_result(expected, raw.payload)
+    if result["status"] == "NO_TEXT" and not registry.accepts_no_text(job.requirement):
+        return None
+    identity = {
+        "job_id": str(upstream.job_id),
+        "evaluation_id": str(raw.evaluation_id),
+        "source": expected["source"],
+        "version": expected["version"],
+        "input_fingerprint": raw.input_fingerprint,
+        "provider": raw.provider,
+        "model": raw.model,
+        "engine_version": raw.engine_version,
+        "submission_id": str(submission.submission_id),
+        "paper_entry_id": str(job.paper_entry_id),
+        "task_revision_id": str(revision.task_revision_id),
+        **recording,
+    }
+    return identity, result
+
+
+def _claim_job(
     engine: Engine,
     job_id: UUID,
     *,
@@ -226,8 +324,24 @@ def claim_job(
         job.last_checked_at = s.scalar(select(func.clock_timestamp()))
         entry = s.get(PaperEntry, job.paper_entry_id)
         revision = s.get(TaskRevision, entry.task_revision_id)
+        plan = s.get(EvaluationPlan, job.paper_entry_id)
+        if (
+            plan is None
+            or plan.task_revision_id != revision.task_revision_id
+            or job.requirement_index < 0
+            or job.requirement_index >= len(plan.requirements)
+            or plan.requirements[job.requirement_index] != job.requirement
+        ):
+            raise ValueError("Frozen evaluation dependency plan is invalid")
         adapter = adapters.get((job.requirement["source"], job.requirement["version"]))
         if adapter is None or not registry.supports(revision.task_type, job.requirement):
+            return None
+        if not registry.valid_dependency(
+            revision.task_type, plan.requirements, job.requirement_index
+        ):
+            return None
+        upstream = _upstream_asr(s, job, submission, revision, plan, registry)
+        if "depends_on" in job.requirement and upstream is None:
             return None
         inputs = adapter.resolve_inputs(s, submission, revision, job.requirement)
         if inputs is None:
@@ -239,6 +353,14 @@ def claim_job(
         ):
             raise TypeError("Adapter inputs must be structured facts")
         inputs = InputSnapshot(json.loads(_json(inputs.refs)), json.loads(_json(inputs.payload)))
+        if registry.recognition_contract(job.requirement):
+            recording = _recording_identity(s, submission)
+            if any(inputs.refs.get(k) != v for k, v in recording.items()):
+                raise InputIdentityConflict("Recognition input recording identity mismatch")
+        if upstream is not None:
+            if "asr" in inputs.refs or "asr" in inputs.payload:
+                raise ValueError("Reserved upstream input key")
+            inputs.refs["asr"], inputs.payload["asr"] = upstream
         refs = {
             "submission_id": str(submission.submission_id),
             "task_revision_id": str(revision.task_revision_id),
@@ -253,7 +375,7 @@ def claim_job(
         if job.input_fingerprint is not None and (
             job.input_fingerprint != digest or job.input_refs != refs
         ):
-            raise ValueError("Evaluation inputs changed after first claim")
+            raise InputIdentityConflict("Evaluation inputs changed after first claim")
         now = s.scalar(select(func.clock_timestamp()))
         token = uuid4()
         job.input_refs, job.input_fingerprint = refs, digest
@@ -262,7 +384,32 @@ def claim_job(
         job.status, job.error_code = "RUNNING", None
         job.attempts += 1
         s.flush()
-        return Claim(job.job_id, token, inputs, json.loads(_json(job.requirement)), adapter)
+        return Claim(
+            job.job_id, token, inputs, json.loads(_json(job.requirement)), adapter, registry
+        )
+
+
+def claim_job(
+    engine: Engine,
+    job_id: UUID,
+    *,
+    registry: Registry,
+    adapters: Mapping[tuple[str, str], Adapter],
+    lease: timedelta,
+) -> Claim | None:
+    try:
+        return _claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+    except InputIdentityConflict:
+        # The failed claim rolled back. Preserve a non-sensitive diagnostic without
+        # changing the frozen input, using the same session-to-job lock order.
+        with Session(engine) as session, session.begin():
+            context = _lock_job_context(session, job_id)
+            if context is not None:
+                job, _, current = context
+                if current and job.status == "WAITING":
+                    job.error_code = "INPUT_IDENTITY_CONFLICT"
+                    session.flush()
+        raise
 
 
 def _finish(
@@ -375,6 +522,8 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
             raise TypeError("Invalid engine identity")
         if not claim.adapter.validate_result(result, requirement):
             raise ValueError("Invalid contract")
+        if claim.registry.recognition_contract(requirement):
+            claim.registry.recognition_result(requirement, result.payload)
     except Exception:  # noqa: BLE001 - invalid contract output is not a score
         metadata = None
         if isinstance(result, AdapterResult):

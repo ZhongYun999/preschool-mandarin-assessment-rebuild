@@ -172,10 +172,7 @@ def create_session(
         if (
             declared is None
             or plan.requirements != declared
-            or any(
-                not isinstance(req, dict) or not registry.supports(revision.task_type, req)
-                for req in plan.requirements
-            )
+            or not registry.valid_plan(revision.task_type, plan.requirements)
         ):
             raise ValueError("Frozen evaluation contract is unavailable or incompatible")
     result = AssessmentSession(
