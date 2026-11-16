@@ -47,8 +47,10 @@ def require_session_access(
     credentials: HTTPAuthorizationCredentials | None = credential_dependency,
     db: Session = write_auth_db_dependency,
 ) -> UUID:
-    """Return a credential ID for confirmation in the business transaction."""
-    return _check_access(session_id, credentials, db)
+    """Return an ID for later confirmation and release the authentication transaction."""
+    credential_id = _check_access(session_id, credentials, db)
+    db.rollback()
+    return credential_id
 
 
 def assessment_read_db(db: Session = db_dependency) -> Session:

@@ -104,7 +104,7 @@ def content(
     db: Session = read_db,
 ):
     task, entry, revision = task_row(db, session_id, task_id)
-    if revision.task_type != "instruction":
+    if revision.task_type not in ("instruction", "repetition"):
         raise HTTPException(404, "Content not available")
     base = f"/assessment/sessions/{session_id}/tasks/{task_id}"
     audio = {
@@ -137,7 +137,9 @@ def content(
                 else None,
             }
             for c in "ABC"
-        ],
+        ]
+        if revision.task_type == "instruction"
+        else [],
         "has_guide": bool(revision.guide_text),
         "audio": audio,
     }
