@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.database import Base
 from app.media.fixed_audio import FixedAudio
+from app.media.recording import recording_busy
 from app.papers.paper import EvaluationPlan, PaperEntry
 from app.sessions.assessment_session import AssessmentSession, Attempt, _identity, _lock_task
 from app.taskbank.models import TaskRevision
@@ -173,8 +174,10 @@ def start_playback(
             raise ValueError("Playback request conflicts")
         return previous
     revision = _revision(session, task)
-    if revision.task_type != "instruction":
+    if revision.task_type not in ("instruction", "repetition"):
         raise ValueError("Unsupported task type")
+    if revision.task_type == "repetition" and recording_busy(session, attempt_id):
+        raise ValueError("Recording in progress")
     if _busy(session, attempt_id):
         raise ValueError("Playback in progress")
     guide_done = not revision.guide_text or _completed(session, attempt_id, "GUIDE")

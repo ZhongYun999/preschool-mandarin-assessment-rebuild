@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.assessment_auth import assessment_read_db, require_read_session_access
 from app.media.fixed_audio import FixedAudio
+from app.media.recording import Recording
 from app.papers.paper import PaperEntry
 from app.scoring.models import FinalScoreResult
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
@@ -28,6 +29,10 @@ class TaskState(BaseModel):
     attempt_id: UUID | None
     attempt_status: str | None
     submission_exists: bool
+    guide_complete: bool
+    initial_prompt_complete: bool
+    recording_in_progress: bool
+    saved_recording_ids: list[UUID]
     allowed_actions: list[str]
 
 
@@ -110,12 +115,31 @@ def session_state(
                 )
             )
         )
+        recordings = (
+            list(db.scalars(select(Recording).where(Recording.attempt_id == attempt.attempt_id)))
+            if attempt and task_type == "repetition"
+            else []
+        )
+        recording_in_progress = any(r.status == "STARTED" for r in recordings)
+        saved_recording_ids = [r.recording_id for r in recordings if r.status == "SAVED"]
+        guide_complete = bool(
+            attempt and (not guide_text or _completed(db, attempt.attempt_id, "GUIDE"))
+        )
+        initial_complete = bool(attempt and _completed(db, attempt.attempt_id, "INITIAL_PROMPT"))
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
                 actions = ["START_ATTEMPT"]
-            elif attempt.status == "OPEN" and task_type == "instruction":
-                actions = _instruction_actions(db, attempt, guide_text, task.paper_entry_id)
+            elif attempt.status == "OPEN" and task_type in ("instruction", "repetition"):
+                if task_type == "repetition" and recording_in_progress:
+                    actions = ["UPLOAD_RECORDING", "CANCEL_RECORDING", "REDO_ATTEMPT"]
+                else:
+                    actions = _instruction_actions(db, attempt, guide_text, task.paper_entry_id)
+                    if task_type == "repetition" and "SUBMIT_INSTRUCTION" in actions:
+                        actions.remove("SUBMIT_INSTRUCTION")
+                        actions.append("START_RECORDING")
+                        if saved_recording_ids:
+                            actions.append("SUBMIT_REPETITION")
             else:
                 actions = ["REDO_ATTEMPT"]
         tasks.append(
@@ -127,6 +151,10 @@ def session_state(
                 attempt_id=attempt.attempt_id if attempt else None,
                 attempt_status=attempt.status if attempt else None,
                 submission_exists=submission,
+                guide_complete=guide_complete,
+                initial_prompt_complete=initial_complete,
+                recording_in_progress=recording_in_progress,
+                saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,
             )
         )
