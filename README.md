@@ -86,6 +86,14 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 `app.evaluation.worker.run_once()` 执行一轮有界调度，调用方需提供数据库 engine、评价合同 Registry、适配器映射、租约时长和批次大小，并按部署需要重复调用。当前没有生产评价适配器；空映射不会产生成功评价。已被重做取代且尚未跨过外发边界的作业会标记为 `SKIPPED`；跨过外发边界后的旧调用可能仍产生费用并保留历史结果。外呼结果不明的作业必须显式授权后才可重试。
 
+## 结算扫描入口
+
+`app.scoring.worker.run_settlement_once(engine, registry=registry, batch_size=100)` 推进数据库中有 `SettlementIntent` 和 `CloseManifest` 且状态为 `INPUT_CLOSED` 的 Session。`batch_size` 是单次查询的分页大小：每轮依次遍历符合条件的场次，逐场使用独立的 `READ COMMITTED` 事务；等待中的场次不会永久占住分页，已锁定场次留待下一轮。返回值包含 `completed`、`pending`、`skipped_locked` 和 `failures`；调用方须检查失败项。失败项包括 Session 身份、异常类型和代码位置，不包含可能敏感的异常内容。历史复核策略不能解释时，`pending` 中提供策略诊断，其他场次仍继续处理。
+
+调用方按需要重复执行评价 Worker 和结算扫描：评价 Worker 根据冻结 `EvaluationPlan` 调度必要来源并持久化 `RawEvaluation`；结算 Worker 不调用外部评价服务，而是使用已保存的证据、单题分及复核事实，推进自动评分和正式固化。必要评价或复核未完成时仍为 `INPUT_CLOSED`；`COMPLETED` 表示正式结果已固化。教师最后一次有效复核也可在复核事务中触发固化。重启后可重新调用扫描入口，已完成结果不会被重算。
+
+当前生产 Registry 尚无正式评分插件，也没有正式评价适配器；本轮验证使用受控测试插件和适配器，仅证明受控环境中的业务闭环，不代表生产上线验收。此入口是供调用方执行的一轮扫描，不包含常驻进程或生产定时任务。
+
 ### 教师复核凭据
 
 题库及资源管理继续使用私有 `TEACHER_MANAGEMENT_TOKEN`。复核写入使用独立的个人高熵随机 Bearer Token；服务端私有环境变量 `TEACHER_REVIEW_TOKEN_HASHES` 保存 JSON 对象，键为稳定教师身份，值为对应 Token 的 SHA-256 十六进制摘要。配置结构示例：`{"teacher-id-a":"<sha256-hex>","teacher-id-b":"<sha256-hex>"}`；占位内容不能直接用于认证。每位教师使用不同 Token，任何摘要不得重复，也不得与共享管理 Token 对应的摘要相同。通过安全渠道生成、分发和轮换凭据，不将原始 Token 或摘要提交仓库、写入日志或 URL。
