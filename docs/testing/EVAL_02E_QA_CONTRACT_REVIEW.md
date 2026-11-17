@@ -14,7 +14,7 @@
 先由用户明确授权模型和上限。一次链路最多调用 `qwen3-asr-flash` 1 次、`qwen-plus` 1 次；仅 ASR 返回 `TEXT` 且有效时调用 LLM。入口拒绝重试和额外外发。两个单模型冒烟命令若另行使用，每个命令分别增加至多一次对应模型调用，须单独纳入授权次数；ASR 静音只检验连通性，不证明语音识别质量。
 
 1. 私下配置 `DASHSCOPE_API_KEY`，确认该地域工作空间拥有两种模型权限；不要把密钥输入聊天、命令历史或版本库。
-2. 使用单独的本地 PostgreSQL 16 测试库 `vnext_eval02e_test`，通过 `TEST_DATABASE_URL` 配置。入口只接受本地主机上的该库名，并在随机临时 schema 内创建测试事实，结束后清理。
+2. 使用单独的本地 PostgreSQL 16 测试库 `vnext_eval02e_test`，通过 `TEST_DATABASE_URL` 配置。入口只接受显式 `127.0.0.1` 或 `::1`、显式端口和该库名，拒绝 URL 查询参数及 `PG*` 环境变量；在创建 schema 前检查实际 TCP 对端及 `current_database()`，并禁止测试夹具隐式加载 `.env`。随后在随机临时 schema 内创建测试事实，结束后清理。
 3. 准备 WAV 格式的已获授权成人录音或合法合成语音，内容可为“小猫在睡觉”；不得使用真实儿童录音。入口的上传声明为 `audio/wav`，实际格式仍由音频准备模块检测。通过私有路径配置 `EVAL02E_AUDIO_FILE`，并确认来源。
 4. 在同一受保护进程中配置 `EVAL02E_REGION`、`EVAL02E_WORKSPACE`、`EVAL02E_NON_CHILD_AUDIO=confirmed`。如需人工核查识别文字和候选评价理由，可额外把 `EVAL02E_PRIVATE_REVIEW_FILE` 指向仓库外的全新绝对路径，所在目录须由操作系统权限保护；该文件含测试转写和结构化评价，不得提交或公开。只有获得本次一 ASR 一 LLM 明确授权后，才设置 `EVAL02E_PAID_CALLS=ASR1_LLM1`。入口不属于默认 pytest 文件匹配，普通 CI 不会调用供应商。
 5. 在仓库根目录执行：
@@ -23,7 +23,7 @@
    python -m pytest backend/tests/manual/real_qa_chain.py -q -s --tb=no --show-capture=no
    ```
 
-入口使用现有测试 Registry、录音存储、音频准备和 Worker；不会封卷或运行正式结算。输出仅包含调用次数、作业状态、请求 ID、实际请求模型、用量、证据关联和是否存在正式结果，不打印录音、识别文本、完整 Prompt、密钥或原始供应商响应。若 ASR 返回 `NO_TEXT`，LLM 不外发；如返回失败或 UNKNOWN，应停下诊断，不自行增加次数或重试。
+入口使用现有测试 Registry、录音存储、音频准备和 Worker；不会封卷或运行正式结算。联调租约为 20 分钟：音频处理最多涉及七次各 60 秒工具调用，单次模型请求的超时配置为 60 秒，其余时间留给文件 I/O 和调度。网络超时属于操作级限制，并非严格的整次调用期限；若租约仍然过期，继续按原有 UNKNOWN 机制处理。专用 HTTP 客户端禁用环境代理，不读取系统代理配置。输出仅包含调用次数、作业状态、请求 ID、实际请求模型、用量、证据关联和是否存在正式结果，不打印录音、识别文本、完整 Prompt、密钥或原始供应商响应。若 ASR 返回 `NO_TEXT`，LLM 不外发；如返回失败或 UNKNOWN，应停下诊断，不自行增加次数或重试。
 
 已存在的单模型入口是 `python -m app.evaluation.asr_smoke --region <REGION> --workspace <WORKSPACE> --confirm-paid-call` 和 `python -m app.evaluation.qa_text_smoke --region <REGION> --workspace <WORKSPACE> --confirm-paid-call`。后者使用虚构回答，而不是上游真实识别结果；二者不能单独证明 ASR→LLM 的关联。
 

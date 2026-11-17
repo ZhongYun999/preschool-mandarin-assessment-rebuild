@@ -1,8 +1,11 @@
 """Opt-in paid EVAL-02E chain; not collected by the default pytest patterns."""
 
+import ipaddress
 import json
 import os
+import socket
 from dataclasses import asdict, replace
+from datetime import timedelta
 from pathlib import Path
 
 import dashscope
@@ -10,10 +13,11 @@ import httpx
 import pytest
 import test_asr_dependency as common
 import test_qa_http
-from sqlalchemy import select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
-from test_asr_dependency import Plugin, claim
+from sqlalchemy.pool import NullPool
+from test_asr_dependency import Plugin
 from test_qwen_qa_text import parameters as text_parameters
 
 from app.evaluation.asr_contract import MODEL as ASR_MODEL
@@ -23,7 +27,7 @@ from app.evaluation.dashscope_asr import DashScopeASR
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.qa_text_contract import SOURCE, VERSION, valid_parameters
 from app.evaluation.qwen_qa_text import QwenQAText
-from app.evaluation.worker import execute_claim
+from app.evaluation.worker import claim_job, execute_claim
 from app.media.audio_inspection import AudioTools
 from app.media.audio_normalization import AudioSpec
 from app.media.recording_store import RecordingStore
@@ -31,6 +35,48 @@ from app.scoring.models import FinalScoreResult
 from app.scoring.registry import QWEN_ASR_CONTRACT, EvaluationContract, Registry
 
 pytest_plugins = ("test_asr_dependency",)
+
+# Seven 60-second audio subprocesses plus one 60-second request can take
+# eight minutes; the remaining twelve minutes cover file I/O and scheduling.
+MANUAL_LEASE = timedelta(minutes=20)
+
+
+def _validate_local_database(url_text):
+    parsed = make_url(url_text)
+    if (
+        parsed.drivername != "postgresql+psycopg"
+        or parsed.host not in ("127.0.0.1", "::1")
+        or parsed.database != "vnext_eval02e_test"
+        or parsed.port is None
+        or parsed.query
+        or any(name.upper().startswith("PG") and value for name, value in os.environ.items())
+    ):
+        raise ValueError("Unsafe test database configuration")
+    engine = create_engine(parsed, poolclass=NullPool, connect_args={"connect_timeout": 5})
+    try:
+        with engine.connect() as connection:
+            current = connection.scalar(text("SELECT current_database()"))
+            driver = connection.connection.driver_connection
+            sock = socket.socket(fileno=driver.fileno())
+            try:
+                peer = sock.getpeername()
+            finally:
+                sock.detach()
+            if (
+                current != "vnext_eval02e_test"
+                or not ipaddress.ip_address(peer[0]).is_loopback
+                or ipaddress.ip_address(peer[0]) != ipaddress.ip_address(parsed.host)
+                or peer[1] != parsed.port
+            ):
+                raise ValueError("Unsafe test database connection")
+    finally:
+        engine.dispose()
+
+
+def _claim(db, flow, source, adapters):
+    return claim_job(
+        db, flow["jobs"][source], registry=flow["registry"], adapters=adapters, lease=MANUAL_LEASE
+    )
 
 
 @pytest.fixture
@@ -45,13 +91,16 @@ def guarded_flow(request, monkeypatch, tmp_path):
     workspace = os.environ.get("EVAL02E_WORKSPACE", "")
     if region not in ("cn-beijing", "ap-southeast-1", "us-east-1") or not workspace:
         pytest.fail("Region and workspace must be configured", pytrace=False)
+    # Both shared fixtures normally read .env; freeze the validated process
+    # configuration so a later dotenv load cannot redirect their connections.
+    import conftest as test_conftest
+
+    import app.database as database_module
+
+    monkeypatch.setattr(database_module, "load_dotenv", lambda: False)
+    monkeypatch.setattr(test_conftest, "load_dotenv", lambda: False)
     try:
-        url = make_url(os.environ.get("TEST_DATABASE_URL", ""))
-        if (
-            url.host not in ("localhost", "127.0.0.1", "::1")
-            or url.database != "vnext_eval02e_test"
-        ):
-            raise ValueError
+        _validate_local_database(os.environ.get("TEST_DATABASE_URL", ""))
     except Exception:  # noqa: BLE001 - do not reveal connection strings
         pytest.fail("Use only the disposable local vnext_eval02e_test database", pytrace=False)
     audio_path = os.environ.get("EVAL02E_AUDIO_FILE")
@@ -151,7 +200,8 @@ def guarded_flow(request, monkeypatch, tmp_path):
 
     def factory(**kwargs):
         return dashscope.Client(
-            **kwargs, http_client=httpx.Client(event_hooks={"request": [before_request]})
+            **kwargs,
+            http_client=httpx.Client(trust_env=False, event_hooks={"request": [before_request]}),
         )
 
     sources = {
@@ -174,9 +224,9 @@ def test_authorized_provider_chain(guarded_flow):
         "formal_result": False,
     }
     try:
-        if claim(db, f, SOURCE, sources) is not None:
+        if _claim(db, f, SOURCE, sources) is not None:
             pytest.fail("LLM did not wait for ASR", pytrace=False)
-        work = claim(db, f, ASR_SOURCE, sources)
+        work = _claim(db, f, ASR_SOURCE, sources)
         if work is None or not execute_claim(db, work):
             pytest.fail("ASR job could not complete", pytrace=False)
         with Session(db) as s:
@@ -207,11 +257,11 @@ def test_authorized_provider_chain(guarded_flow):
             if summary["formal_result"]:
                 pytest.fail("Unexpected formal result", pytrace=False)
         if summary["asr_status"] == "NO_TEXT":
-            if claim(db, f, SOURCE, sources) is not None:
+            if _claim(db, f, SOURCE, sources) is not None:
                 pytest.fail("NO_TEXT unexpectedly dispatched LLM", pytrace=False)
             summary["llm_status"] = "WAITING_NO_TEXT"
             return
-        work = claim(db, f, SOURCE, sources)
+        work = _claim(db, f, SOURCE, sources)
         if work is None or not execute_claim(db, work):
             pytest.fail("LLM job could not complete", pytrace=False)
         with Session(db) as s:
