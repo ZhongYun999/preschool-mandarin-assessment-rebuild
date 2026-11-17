@@ -3,7 +3,7 @@
 Adapters are trusted deployed code: resolve_inputs only reads persisted facts and
 performs no external I/O. None means an upstream dependency is not ready. The
 adapter must validate the versioned output contract, and execute outside the DB
-transaction. No production adapters are registered here.
+transaction. Adapters are supplied explicitly by the worker caller.
 """
 
 import hashlib
