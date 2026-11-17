@@ -282,6 +282,8 @@ def _upstream_asr(
         raise InputIdentityConflict("Upstream recognition evidence identity mismatch")
     result = registry.recognition_result(expected, raw.payload)
     if result["status"] == "NO_TEXT" and not registry.accepts_no_text(job.requirement):
+        if job.status == "WAITING":
+            job.error_code = "ASR_NO_TEXT_NOT_ACCEPTED"
         return None
     identity = {
         "job_id": str(upstream.job_id),
@@ -334,7 +336,10 @@ def _claim_job(
         ):
             raise ValueError("Frozen evaluation dependency plan is invalid")
         adapter = adapters.get((job.requirement["source"], job.requirement["version"]))
-        if adapter is None or not registry.supports(revision.task_type, job.requirement):
+        if adapter is None:
+            return None
+        if not registry.supports(revision.task_type, job.requirement):
+            job.error_code = "EVALUATION_CONTRACT_UNAVAILABLE"
             return None
         if not registry.valid_dependency(
             revision.task_type, plan.requirements, job.requirement_index

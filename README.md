@@ -161,3 +161,16 @@ ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存�
 当前未执行真实供应商在线测试。仅在明确授权一次可能收费的调用且配置合法密钥后，可运行 `python -m app.evaluation.asr_smoke --region cn-beijing --workspace <WORKSPACE_ID> --confirm-paid-call`；命令只生成一秒人工静音音频，单次请求，不输出识别全文、密钥或音频。默认测试和 CI 不运行该命令。当前仍无正式 LLM、ISE 或生产评分插件。
 
 参考：[Qwen-ASR API](https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference)、[音频规格](https://help.aliyun.com/zh/model-studio/non-realtime-speech-recognition-user-guide)。
+
+
+### QA 文本评价候选合同
+
+`QwenQAText` 提供 Qwen-Plus 的 DashScope 同步文本接口，使用非思考模式和 JSON Object 输出，并在服务端严格校验结构、数值、重复键及有限数字。`qwen-qa-text-candidate` / `test-v1` 是历史档位的候选测试合同，绑定代码中的 `qa-text-candidate-v1` 系统 Prompt 及 SHA-256；这些档位尚未获得 VNext 正式业务确认，合同不在生产 Registry 中，不能作为正式评分标准。生产 Registry 仍无正式评分插件。
+
+测试 Registry 可显式声明同一 Submission 的 ASR 上游依赖及 `accepts_no_text=False`。题目版本、学段、题干、文字材料、参考答案、评分说明、图片是否存在、Prompt 版本与摘要、模型和请求参数均进入冻结输入；儿童识别文本和题目材料作为 User 数据，不作为系统指令。纯文本模型不会接收图片，也不应猜测图片内容。ASR 未完成或失败时下游等待；ASR 明确无文本时下游等待并记录 `ASR_NO_TEXT_NOT_ACCEPTED`，不生成零分。冻结合同或 Prompt 不可用时记录 `EVALUATION_CONTRACT_UNAVAILABLE`，不会替换为最新版本。
+
+模型和工作空间、地域、JSON 模式及温度由已发布计划固定，API Key 只从私有环境变量 `DASHSCOPE_API_KEY` 读取。一个领取对应一次外发，SDK 禁用自动重试；明确拒绝为 FAILED，返回内容不符合合同为 INVALID，超时及结果未知为 UNKNOWN。后续复核资格仍由冻结 ReviewPolicy 裁决。Worker 租约需要覆盖供应商请求超时。
+
+当前 Qwen3-ASR 与 Qwen 文本模型均未执行真实在线冒烟测试；测试替身不能证明模型评分质量。只有明确授权一次可能收费的调用并配置合法密钥后，才可执行 `python -m app.evaluation.qa_text_smoke --region cn-beijing --workspace <WORKSPACE_ID> --confirm-paid-call`。该命令只使用人工虚构的题目和回答，不进入普通 pytest 或 CI，不输出 Prompt 或完整回答。正式档位、无可信文本的评价规则和生产评分插件仍待业务确认。
+
+参考：[Qwen Chat API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)、[地域](https://help.aliyun.com/zh/model-studio/regions)。
