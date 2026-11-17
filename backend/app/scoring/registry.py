@@ -1,9 +1,14 @@
-"""Static scoring and validated evaluation contracts; production has no entries yet."""
+"""Static scoring and validated evaluation contracts."""
 
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from app.evaluation.asr_contract import SOURCE as QWEN_ASR_SOURCE
+from app.evaluation.asr_contract import VERSION as QWEN_ASR_VERSION
+from app.evaluation.asr_contract import recognition_result as qwen_asr_recognition_result
+from app.evaluation.asr_contract import valid_parameters as valid_qwen_asr_parameters
 
 
 class ScoringUnavailable(ValueError):
@@ -184,4 +189,12 @@ class Registry:
         return result
 
 
-PRODUCTION_REGISTRY = Registry()
+QWEN_ASR_CONTRACT = EvaluationContract(
+    QWEN_ASR_SOURCE,
+    QWEN_ASR_VERSION,
+    frozenset({"qa"}),
+    valid_qwen_asr_parameters,
+    False,
+    recognition_result=qwen_asr_recognition_result,
+)
+PRODUCTION_REGISTRY = Registry(contracts=[QWEN_ASR_CONTRACT])

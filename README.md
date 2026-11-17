@@ -137,7 +137,7 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 识别合同的 `recognition_result` 必须是确定性的纯解析函数，将实际原始结果解析为 `{"status":"TEXT","text":"..."}` 或 `{"status":"NO_TEXT","text":null}`；下游合同以 `accepts_no_text` 明确声明是否接受后者。未就绪的上游及不接受的无可信文本使下游保持等待，不生成虚构文本或零分。Worker 在领取下游时校验同一 Submission、冻结题目与录音身份，将上游 Job、RawEvaluation、合同版本和输入指纹写入输入引用，并把识别状态和文本纳入输入指纹；适配器分别通过 `InputSnapshot.refs["asr"]` 和 `InputSnapshot.payload["asr"]` 读取上游身份与识别状态。重试不得更换已冻结输入；身份冲突会拒绝领取并在等待作业中记录 `INPUT_IDENTITY_CONFLICT` 诊断。
 
-ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存储引用及声明的媒体类型，并在事务外读取、校验实际文件。媒体类型声明不代表编码、采样率或声道已通过验证；真实供应商适配器须按其合同验证。当前未接入正式 ASR／LLM 适配器，也没有常驻调度服务；受控测试音频不能代表生产兼容性。该依赖能力仅处理显式声明的识别上游，不是通用工作流引擎。
+ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存储引用及声明的媒体类型，并在事务外读取、校验实际文件。媒体类型声明不代表编码、采样率或声道已通过验证；真实供应商适配器须按其合同验证。已提供 Qwen3-ASR-Flash 适配器，但尚未接入正式 LLM 适配器或常驻调度服务；受控测试音频不能代表生产兼容性。该依赖能力仅处理显式声明的识别上游，不是通用工作流引擎。
 
 ### 录音技术检查与按需转换
 
@@ -145,4 +145,19 @@ ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存�
 
 `AudioTools(ffmpeg=..., ffprobe=..., timeout=..., max_input_bytes=..., max_decoded_bytes=...)` 由服务端可信配置构造；默认从 PATH 查找 `ffmpeg` 和 `ffprobe`，默认超时 60 秒、输入及解码输出技术预算各 1 GiB，部署可调整这些技术预算。工具版本可通过 `tools.version()` 和 `tools.version(probe=True)` 获取；必须与冻结规格一致，升级工具应发布新处理版本并保留旧版本执行环境。调用方自行提供受保护的独立 `RecordingStore` 派生目录，所有相关 Worker 必须能访问相同的原始和派生目录；禁止公开托管。派生副本以内容摘要寻址，另以原始摘要、目标规格和工具版本索引；复用时重新校验摘要及解码结果。原始录音不会被覆盖或删除，也没有自动清理。
 
-检测以私有录音字节而非声明 MIME 或扩展名为准，使用 FFprobe 检查真实容器和音频流，再通过 FFmpeg 完整解码验证；报告已解码采样时长，并单独保留容器报告的时长（若可得）。当前目标转换支持调用方指定采样率及声道的 WAV PCM S16LE／S24LE；匹配且解码有效时直接复用原始文件。FFmpeg 通过仅允许 `pipe` 输入的子进程接收私有副本，不允许音频引用网络资源。需要随机访问的部分容器可能无法经管道处理，会返回技术失败；客户端声明、人工构造的 WAV/MP3 和本地 FFmpeg 测试不能证明真实设备及供应商兼容性。尚未接入正式 ASR、ISE 或 LLM 适配器。
+检测以私有录音字节而非声明 MIME 或扩展名为准，使用 FFprobe 检查真实容器和音频流，再通过 FFmpeg 完整解码验证；报告已解码采样时长，并单独保留容器报告的时长（若可得）。当前目标转换支持调用方指定采样率及声道的 WAV PCM S16LE／S24LE；匹配且解码有效时直接复用原始文件。FFmpeg 通过仅允许 `pipe` 输入的子进程接收私有副本，不允许音频引用网络资源。需要随机访问的部分容器可能无法经管道处理，会返回技术失败；客户端声明、人工构造的 WAV/MP3 和本地 FFmpeg 测试不能证明真实设备及供应商兼容性。尚未接入正式 ISE 或 LLM 适配器。
+
+
+### Qwen3-ASR-Flash
+
+已注册 `dashscope-qwen3-asr` / `1` 的 QA 识别合同，使用 DashScope SDK 同步多模态接口；生产 Registry 尚无正式评分插件，不会因此自动产生 ASR、LLM 或 ISE 作业。调用者仅对冻结计划中明确声明的来源构造 `DashScopeASR(original_store, derived_store, tools)` 并传入 Worker 的 adapters 映射；不存在全局自动启动的评价 Worker。
+
+合同 `parameters` 必须完整冻结 `model`（`qwen3-asr-flash`）、`region`（`cn-beijing`、`ap-southeast-1` 或 `us-east-1`）、可信 `workspace`、布尔值 `enable_itn`、可空的 `language` 和 `audio_spec`。`audio_spec` 指定 WAV PCM S16LE、16000 Hz、单声道及处理版本、FFmpeg/FFprobe 版本。区域和工作空间确定对应阿里云专属服务地址；API Key 只从私有环境变量 `DASHSCOPE_API_KEY` 读取，不进入作业输入。录音存储和派生存储需由服务端以私有目录配置。
+
+领取后适配器在事务外验证录音并按合同准备 WAV，以 Base64 Data URI 调用一次同步接口；源音频和生成音频时长超过 5 分钟，或 Data URI 超过 10 MB 时返回 `ASR_AUDIO_INCOMPATIBLE`，不截断或修改已保存录音。这是该供应商模型的请求兼容限制。成功且完整的响应中，非空文本为 `TEXT`，明确返回空字符串为 `NO_TEXT`；缺字段、异常结束和拒绝不作为无语音，也不伪造置信度。保存的模型名是实际请求的模型标识，响应未提供的引擎版本不猜测。来源包括请求 ID、实际返回的有限用量字段和录音派生证据。
+
+认证、权限、配额、请求不合法及音频技术错误记录为 `FAILED`；网络中断、超时和无法确定结果的供应商错误记录为 `UNKNOWN`。SDK 关闭自动重试；UNKNOWN 须通过既有显式确认恢复机制处理。Worker 租约需覆盖音频准备与供应商请求超时，否则可能因租约过期保守记为 UNKNOWN。成功结果和正式成绩不会因后台重启而重算。
+
+当前未执行真实供应商在线测试。仅在明确授权一次可能收费的调用且配置合法密钥后，可运行 `python -m app.evaluation.asr_smoke --region cn-beijing --workspace <WORKSPACE_ID> --confirm-paid-call`；命令只生成一秒人工静音音频，单次请求，不输出识别全文、密钥或音频。默认测试和 CI 不运行该命令。当前仍无正式 LLM、ISE 或生产评分插件。
+
+参考：[Qwen-ASR API](https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference)、[音频规格](https://help.aliyun.com/zh/model-studio/non-realtime-speech-recognition-user-guide)。
