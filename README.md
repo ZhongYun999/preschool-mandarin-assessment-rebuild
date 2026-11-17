@@ -138,3 +138,11 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 识别合同的 `recognition_result` 必须是确定性的纯解析函数，将实际原始结果解析为 `{"status":"TEXT","text":"..."}` 或 `{"status":"NO_TEXT","text":null}`；下游合同以 `accepts_no_text` 明确声明是否接受后者。未就绪的上游及不接受的无可信文本使下游保持等待，不生成虚构文本或零分。Worker 在领取下游时校验同一 Submission、冻结题目与录音身份，将上游 Job、RawEvaluation、合同版本和输入指纹写入输入引用，并把识别状态和文本纳入输入指纹；适配器分别通过 `InputSnapshot.refs["asr"]` 和 `InputSnapshot.payload["asr"]` 读取上游身份与识别状态。重试不得更换已冻结输入；身份冲突会拒绝领取并在等待作业中记录 `INPUT_IDENTITY_CONFLICT` 诊断。
 
 ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存储引用及声明的媒体类型，并在事务外读取、校验实际文件。媒体类型声明不代表编码、采样率或声道已通过验证；真实供应商适配器须按其合同验证。当前未接入正式 ASR／LLM 适配器，也没有常驻调度服务；受控测试音频不能代表生产兼容性。该依赖能力仅处理显式声明的识别上游，不是通用工作流引擎。
+
+### 录音技术检查与按需转换
+
+原始录音是不可变作答证据，继续按上传时的摘要保存在 `RECORDING_ROOT`；上传和正式提交不依赖音频工具。后台适配器可在 `resolve_inputs()` 事务中仅调用 `recording_input()`，将录音 ID、摘要、声明媒体类型，以及其评价合同要求的 `AudioSpec`（目标 WAV 编码、采样率、声道、处理版本和 FFmpeg/FFprobe 版本）放入冻结输入。领取后，在 `evaluate()` 的事务外调用 `prepare_audio()`；适配器须把返回的 `PreparedAudio` 来源信息保存到自己的 RawEvaluation 合同中，并把 `AudioError.code` 映射为 Worker 的 `KnownFailure`。处理失败只产生技术失败，不代表 ASR 无文本、零分或儿童须重新录音。处理成功本身也不是评价结果。
+
+`AudioTools(ffmpeg=..., ffprobe=..., timeout=..., max_input_bytes=..., max_decoded_bytes=...)` 由服务端可信配置构造；默认从 PATH 查找 `ffmpeg` 和 `ffprobe`，默认超时 60 秒、输入及解码输出技术预算各 1 GiB，部署可调整这些技术预算。工具版本可通过 `tools.version()` 和 `tools.version(probe=True)` 获取；必须与冻结规格一致，升级工具应发布新处理版本并保留旧版本执行环境。调用方自行提供受保护的独立 `RecordingStore` 派生目录，所有相关 Worker 必须能访问相同的原始和派生目录；禁止公开托管。派生副本以内容摘要寻址，另以原始摘要、目标规格和工具版本索引；复用时重新校验摘要及解码结果。原始录音不会被覆盖或删除，也没有自动清理。
+
+检测以私有录音字节而非声明 MIME 或扩展名为准，使用 FFprobe 检查真实容器和音频流，再通过 FFmpeg 完整解码验证；报告已解码采样时长，并单独保留容器报告的时长（若可得）。当前目标转换支持调用方指定采样率及声道的 WAV PCM S16LE／S24LE；匹配且解码有效时直接复用原始文件。FFmpeg 通过仅允许 `pipe` 输入的子进程接收私有副本，不允许音频引用网络资源。需要随机访问的部分容器可能无法经管道处理，会返回技术失败；客户端声明、人工构造的 WAV/MP3 和本地 FFmpeg 测试不能证明真实设备及供应商兼容性。尚未接入正式 ASR、ISE 或 LLM 适配器。
