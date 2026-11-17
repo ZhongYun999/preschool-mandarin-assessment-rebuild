@@ -176,6 +176,8 @@ _SAFE_ERRORS = frozenset(
         "LEASE_EXPIRED_OUTCOME_UNKNOWN",
         "TEMPORARY_FAILURE",
         "INPUT_IDENTITY_CONFLICT",
+        "ASR_NO_TEXT_NOT_ACCEPTED",
+        "EVALUATION_CONTRACT_UNAVAILABLE",
     }
 )
 _IDENTITY = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
