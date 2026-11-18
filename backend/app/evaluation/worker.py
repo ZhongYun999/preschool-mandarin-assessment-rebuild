@@ -82,9 +82,11 @@ def _json(value: Any) -> str:
     )
 
 
-def schedule(session: Session, *, limit: int | None = None) -> int:
+def schedule(
+    session: Session, *, limit: int | None = None, submission_id: UUID | None = None
+) -> int:
     """Create at most one job per genuine, frozen intent in the caller transaction."""
-    rows = session.execute(
+    query = (
         select(EvaluationIntent, Submission, SessionTask, EvaluationPlan)
         .join(Submission, Submission.submission_id == EvaluationIntent.submission_id)
         .join(SessionTask, SessionTask.session_task_id == Submission.session_task_id)
@@ -92,7 +94,10 @@ def schedule(session: Session, *, limit: int | None = None) -> int:
         .where(EvaluationIntent.scheduled_at.is_(None))
         .order_by(EvaluationIntent.intent_id)
         .limit(limit)
-    ).all()
+    )
+    if submission_id is not None:
+        query = query.where(Submission.submission_id == submission_id)
+    rows = session.execute(query).all()
     count = 0
     for intent, submission, task, plan in rows:
         if (

@@ -174,3 +174,28 @@ ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存�
 当前 Qwen3-ASR 与 Qwen 文本模型均未执行真实在线冒烟测试；测试替身不能证明模型评分质量。只有明确授权一次可能收费的调用并配置合法密钥后，才可执行 `python -m app.evaluation.qa_text_smoke --region cn-beijing --workspace <WORKSPACE_ID> --confirm-paid-call`。该命令只使用人工虚构的题目和回答，不进入普通 pytest 或 CI，不输出 Prompt 或完整回答。正式档位、无可信文本的评价规则和生产评分插件仍待业务确认。
 
 参考：[Qwen Chat API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)、[地域](https://help.aliyun.com/zh/model-studio/regions)。
+
+## 本地 QA 评价测试工作台
+
+此工具仅供 Windows 本机研发测试，不属于生产应用或正式儿童施测端。先在 `backend/.env` 配置 `TEST_DATABASE_URL`，其 PostgreSQL 主机须为本机、数据库名须为 `vnext_eval02e_test`；工具拒绝其他数据库。若该库尚未迁移，先在 `backend` 目录中仅对该测试库运行现有 Alembic 迁移：
+
+```powershell
+..\.venv\Scripts\python.exe tests/manual/workbench.py --migrate
+```
+
+从仓库根目录启动（需要项目 `.venv` 和 PATH 中的 FFmpeg、FFprobe）：
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe tests/manual/workbench.py
+```
+
+打开 <http://127.0.0.1:8000/dev/qa>。服务只监听 `127.0.0.1:8000`，测试路由不会挂到 `app.main`。准备场次会通过领域发布逻辑建立独立测试题库、试卷、评价计划与 Session；原始数据保存在上述测试库，音频保存在被 Git 忽略的 `uploads/local-qa-workbench/`。页面刷新不会清理数据。不得在该库放入生产数据。
+
+在页面显式开始题目，播放首播，再授权浏览器麦克风并录音；也可选择已有音频文件进行排查。提示音是无语义 WAV，仅用于播放协议测试。浏览器使用 MediaRecorder 支持的 MIME 类型，上传原始字节；离线 ASR 作业通过现有 FFprobe/FFmpeg 检查并转换音频，诊断中显示实际容器和编码。上传 SAVED 后须显式正式提交；手动点击离线评价才会调度当前 Submission 的作业。Mock 的固定文本和四维数据只用于验证依赖链，**不代表真实模型输出或正式成绩**。
+
+浏览器声明的完整 MIME（包括编码参数）仅保存在本机浏览器存储中；现有录音接口保存基础媒体类型。FFprobe 的实际容器和编码以诊断证据为准。
+
+刷新会从服务器恢复状态，上传结果不确定时先刷新；页面关闭后本地未上传录音可能丢失，可以取消服务端 STARTED 录音并重新录制。中断的播放应报告未完成，再选择技术重试；提交结果不确定时刷新查看 ACCEPTED。失败或未知作业可在页面显式授权重试，UNKNOWN 需明确确认；之后再手动执行离线评价。
+
+本入口没有真实模型运行模式或收费适配器，也不会向网页发送教师管理 Token 或模型密钥。真实 Qwen ASR/LLM 的调用、授权和预算尚未接入；后续必须另行授权并在服务端实现预算控制，不能仅启用网页按钮。若端口被占用请停止占用该端口的进程，不要改为对外监听。
