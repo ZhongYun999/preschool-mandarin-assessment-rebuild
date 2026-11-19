@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from dotenv import dotenv_values
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import make_url
@@ -226,6 +226,15 @@ def create_app(engine, data_root):
             raise HTTPException(404, "Test session not found")
         return row
 
+    def selected_task(db, sid, task_id):
+        tasks = db.scalars(select(SessionTask).where(SessionTask.session_id == sid)).all()
+        if task_id is None and len(tasks) == 1:
+            return tasks[0]
+        task = next((item for item in tasks if item.session_task_id == task_id), None)
+        if task is None:
+            raise HTTPException(404, "Test session task not found")
+        return task
+
     @app.get("/dev/qa")
     def page():
         return FileResponse(HERE / "index.html")
@@ -247,33 +256,42 @@ def create_app(engine, data_root):
             ]
 
     @app.post("/dev/qa/sessions")
-    def create():
+    def create(count: int = Query(default=1, ge=1, le=2)):
         with Session(engine) as db, db.begin():
             bank = TaskBank(bank_id=uuid4(), name="本地 QA 测试题库")
             db.add(bank)
             db.flush()
-            task = append_revision(
-                db,
-                bank_id=bank.bank_id,
-                task_code="qa",
-                display_order=1,
-                content=RevisionContent(
-                    grade_level="测试",
-                    task_type="qa",
-                    prompt_text="小猫在做什么？",
-                    material_description="一只小猫趴在垫子上。",
-                    reference_answer="小猫在休息。",
-                    scoring_instruction="语义相近的合理回答均可接受。",
-                ),
-                images={},
-            )
             paper = create_draft(db, bank_id=bank.bank_id, name="本地 QA 测试卷")
             pid = paper.paper_id
-            add_entry(db, paper_id=pid, expected_version=0, task_id=task.task_id, position=1)
+            for index in range(count):
+                task = append_revision(
+                    db,
+                    bank_id=bank.bank_id,
+                    task_code=f"qa-{index + 1}",
+                    display_order=index + 1,
+                    content=RevisionContent(
+                        grade_level="测试",
+                        task_type="qa",
+                        prompt_text=("小猫在做什么？" if index == 0 else "小狗在做什么？"),
+                        material_description=(
+                            "一只小猫趴在垫子上。" if index == 0 else "一只小狗正在跑。"
+                        ),
+                        reference_answer=("小猫在休息。" if index == 0 else "小狗在跑。"),
+                        scoring_instruction="语义相近的合理回答均可接受。",
+                    ),
+                    images={},
+                )
+                add_entry(
+                    db,
+                    paper_id=pid,
+                    expected_version=index,
+                    task_id=task.task_id,
+                    position=index + 1,
+                )
             select_plugin(
                 db,
                 paper_id=pid,
-                expected_version=1,
+                expected_version=count,
                 plugin_id=TestPlugin.plugin_id,
                 version="1",
                 registry=REGISTRY,
@@ -281,7 +299,7 @@ def create_app(engine, data_root):
             publish(
                 db,
                 paper_id=pid,
-                expected_version=2,
+                expected_version=count + 1,
                 registry=REGISTRY,
                 audio_config={
                     "provider": "local-mock",
@@ -314,10 +332,10 @@ def create_app(engine, data_root):
             return {"token": result.token}
 
     @app.get("/dev/qa/sessions/{sid}/diagnostics")
-    def diagnostics(sid: UUID):
+    def diagnostics(sid: UUID, task_id: UUID | None = None):
         with Session(engine) as db:
             owner(db, sid)
-            task = db.scalar(select(SessionTask).where(SessionTask.session_id == sid))
+            task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
             )
@@ -364,10 +382,10 @@ def create_app(engine, data_root):
             }
 
     @app.post("/dev/qa/sessions/{sid}/run-offline")
-    def run_offline(sid: UUID):
+    def run_offline(sid: UUID, task_id: UUID | None = None):
         with Session(engine) as db, db.begin():
             owner(db, sid)
-            task = db.scalar(select(SessionTask).where(SessionTask.session_id == sid))
+            task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
             )
@@ -396,12 +414,12 @@ def create_app(engine, data_root):
         return {"mode": "offline-mock"}
 
     @app.post("/dev/qa/sessions/{sid}/jobs/{job_id}/retry")
-    def retry(sid: UUID, job_id: UUID, body: dict):
+    def retry(sid: UUID, job_id: UUID, body: dict, task_id: UUID | None = None):
         if set(body) != {"accept_unknown"} or type(body["accept_unknown"]) is not bool:
             raise HTTPException(422, "Explicit retry acknowledgment required")
         with Session(engine) as db, db.begin():
             owner(db, sid)
-            task = db.scalar(select(SessionTask).where(SessionTask.session_id == sid))
+            task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
             )

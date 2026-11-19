@@ -155,3 +155,101 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
     assert not any(
         getattr(route, "path", "").startswith("/dev/qa") for route in production_app.routes
     )
+
+
+def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
+    app = workbench.create_app(db, tmp_path)
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        client=("127.0.0.1", 12345),
+        headers={"Origin": "http://127.0.0.1:8000"},
+    ) as c:
+        sid = c.post("/dev/qa/sessions?count=2").json()["session_id"]
+        token = c.post(f"/dev/qa/sessions/{sid}/token").json()["token"]
+        auth = {"Authorization": "Bearer " + token}
+        root = f"/assessment/sessions/{sid}"
+        tasks = c.get(root, headers=auth).json()["tasks"]
+        assert len(tasks) == 2
+        ids = [t["session_task_id"] for t in tasks]
+        assert len(set(ids)) == 2
+        data = io.BytesIO()
+        with wave.open(data, "wb") as audio:
+            audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x00\x00" * 1600)
+
+        def start(index):
+            base = f"{root}/tasks/{ids[index]}"
+            aid = c.post(base + "/attempt", headers=auth).json()["attempt_id"]
+            play = c.post(
+                base + "/playbacks",
+                headers=auth,
+                json={"attempt_id": aid, "request_id": "prompt", "kind": "INITIAL_PROMPT"},
+            ).json()
+            assert (
+                c.post(
+                    base + "/playbacks/" + play["playback_id"] + "/finish",
+                    headers=auth,
+                    json={"attempt_id": aid, "completed": True},
+                ).status_code
+                == 200
+            )
+            return base, aid
+
+        def submit(base, aid):
+            rid = c.post(
+                base + "/recordings", headers=auth, json={"attempt_id": aid, "request_id": "record"}
+            ).json()["recording_id"]
+            response = c.post(
+                base + "/recordings/" + rid + "/content",
+                content=data.getvalue(),
+                headers={**auth, "X-Attempt-Id": aid, "Content-Type": "audio/wav"},
+            )
+            assert response.status_code == 200
+            body = {"attempt_id": aid, "recording_id": rid, "submit_request_id": f"submit-{aid}"}
+            first = c.post(base + "/submissions/qa", headers=auth, json=body).json()
+            assert c.post(base + "/submissions/qa", headers=auth, json=body).json() == first
+            return rid, first["submission_id"]
+
+        first_base, a1 = start(0)
+        r1, s1 = submit(first_base, a1)
+        assert c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[0]}").json()["jobs"] == []
+        second_base, a2 = start(1)
+        assert a1 != a2
+        assert c.post(f"/dev/qa/sessions/{sid}/run-offline?task_id={ids[0]}").status_code == 200
+        first = c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[0]}").json()
+        assert first["submission"]["submission_id"] == s1
+        assert all(
+            j["status"] == "READY" and j["input_refs"]["submission_id"] == s1 for j in first["jobs"]
+        )
+        r2, s2 = submit(second_base, a2)
+        assert r1 != r2 and s1 != s2
+        assert c.post(f"/dev/qa/sessions/{sid}/run-offline?task_id={ids[1]}").status_code == 200
+        second = c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[1]}").json()
+        assert second["recording"]["recording_id"] == r2
+        assert all(j["input_refs"]["submission_id"] == s2 for j in second["jobs"])
+        assert first["jobs"][0]["evidence"]["id"] != second["jobs"][0]["evidence"]["id"]
+        state = c.get(root, headers=auth).json()
+        assert all(t["submission_exists"] for t in state["tasks"])
+        assert (
+            c.post(
+                second_base + "/redo", headers=auth, json={"redo_request_id": "redo"}
+            ).status_code
+            == 200
+        )
+        assert (
+            c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[1]}").json()["submission"]
+            is None
+        )
+        assert c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[0]}").json() == first
+        second_base, new_attempt = start(1)
+        assert new_attempt != a2
+        new_recording, new_submission = submit(second_base, new_attempt)
+        assert new_recording != r2 and new_submission != s2
+        assert c.post(f"/dev/qa/sessions/{sid}/run-offline?task_id={ids[1]}").status_code == 200
+        replacement = c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[1]}").json()
+        assert replacement["submission"]["submission_id"] == new_submission
+        assert all(j["input_refs"]["submission_id"] == new_submission for j in replacement["jobs"])
+        assert replacement["jobs"][0]["evidence"]["id"] != second["jobs"][0]["evidence"]["id"]
+        assert c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[0]}").json() == first
+        assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").status_code == 404
