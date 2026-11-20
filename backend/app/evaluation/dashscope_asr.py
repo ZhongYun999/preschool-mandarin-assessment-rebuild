@@ -42,9 +42,11 @@ class DashScopeASR:
         *,
         timeout: float = 60,
         client_factory=None,
+        credential_provider=None,
     ):
         self.original_store, self.derived_store, self.tools = original_store, derived_store, tools
         self.timeout, self._factory = timeout, client_factory
+        self._credential_provider = credential_provider
 
     def resolve_inputs(self, session, submission, revision, requirement):
         if (requirement.get("source"), requirement.get("version")) != (
@@ -97,7 +99,14 @@ class DashScopeASR:
         uri = "data:audio/wav;base64," + base64.b64encode(data).decode("ascii")
         if len(uri) > MAX_DATA_URI_BYTES:
             raise KnownFailure("ASR_AUDIO_INCOMPATIBLE")
-        key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        try:
+            key = (
+                self._credential_provider()
+                if self._credential_provider is not None
+                else os.environ.get("DASHSCOPE_API_KEY", "")
+            ).strip()
+        except Exception:  # noqa: BLE001 - credentials must not leak through diagnostics
+            raise KnownFailure("ASR_CREDENTIALS_UNAVAILABLE") from None
         if not key:
             raise KnownFailure("ASR_CREDENTIALS_MISSING")
         options = {"enable_itn": p["enable_itn"]}

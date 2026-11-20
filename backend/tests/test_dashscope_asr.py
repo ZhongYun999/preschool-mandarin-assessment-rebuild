@@ -228,3 +228,22 @@ def test_successful_response_uses_only_real_usage_fields(setup):
         "input_tokens_details": {"text_tokens": 2},
         "output_tokens_details": {"text_tokens": 7},
     }
+
+
+def test_injected_credential_failure_never_falls_back_to_environment(setup):
+    tools, original, derived, inputs, requirement, _ = setup
+    calls = []
+
+    def unavailable():
+        raise ValueError("private credential error")
+
+    adapter = DashScopeASR(
+        original,
+        derived,
+        tools,
+        credential_provider=unavailable,
+        client_factory=lambda **kw: calls.append(kw),
+    )
+    with pytest.raises(KnownFailure, match="ASR_CREDENTIALS_UNAVAILABLE"):
+        adapter.evaluate(inputs, requirement)
+    assert calls == []

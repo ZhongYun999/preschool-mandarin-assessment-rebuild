@@ -3,11 +3,13 @@ const $ = id => document.getElementById(id);
 let sid = '', token = '', task = null, attempt = null, plays = [], recs = [], blob = null;
 let player = null, activePlay = null, recorder = null, stream = null, jobs = [];
 let selectedTask = '', capture = null, uploading = false, starting = false;
+let providerState = null;
+let currentMode = 'mock';
 const pending = new Map();
 const pendingKey = () => `${sid}:${task?.session_task_id}:${attempt}`;
 const taskQuery = () => `?task_id=${encodeURIComponent(task.session_task_id)}`;
 const busy = () => Boolean(capture || uploading || starting || activePlay);
-function lockControls() { for (const id of ['create','createTwo','open','tasks','start','guide','initial','replay','retry','record','useFile','upload','cancel','submit','redo','run','retryJob']) $(id).disabled=true; }
+function lockControls() { for (const id of ['create','createTwo','open','tasks','start','guide','initial','replay','retry','record','useFile','upload','cancel','submit','redo','run','authorizePaid','runPaid','retryJob']) $(id).disabled=true; }
 const key = suffix => `qa-workbench:${sid}:${task?.session_task_id || ''}:${attempt || ''}:${suffix}`;
 const remember = name => { const k = key(name); let v = localStorage.getItem(k); if (!v) { v = crypto.randomUUID(); localStorage.setItem(k, v); } return v; };
 const forget = name => localStorage.removeItem(key(name));
@@ -25,6 +27,9 @@ const base = () => `${root()}/tasks/${task.session_task_id}`;
 const inform = value => $('message').textContent = value;
 const showError = async e => { inform(`操作未确认：${e.message}。请刷新状态后使用原操作重试。`); try { await refresh(); } catch (_) {} };
 const bind = (id, handler) => $(id).addEventListener('click', () => Promise.resolve().then(handler).catch(showError));
+async function providerStatus(){ providerState=await api('/dev/qa/provider-config'); $('providerKey').value=''; $('providerStatus').textContent=providerState.configured ? `已配置：${providerState.provider} / ${providerState.region} / ${providerState.workspace}` : '未配置或凭据不可用'; if(providerState.region) $('region').value=providerState.region; if(providerState.workspace) $('workspace').value=providerState.workspace; $('disableProvider').disabled=!providerState.credential_id; }
+bind('saveProvider',async()=>{const secret=$('providerKey').value; const retain=$('retainKey').checked; try {if(secret && providerState?.credential_id && !confirm('确认轮换为新凭据？旧凭据会保留供已有任务使用。')) return; await post('/dev/qa/provider-config',{region:$('region').value,workspace:$('workspace').value,api_key:secret || null,retain_credential_id:retain ? providerState?.credential_id : null}); await providerStatus();} finally {$('providerKey').value='';} });
+bind('disableProvider',async()=>{if(!providerState?.credential_id || !confirm('停用当前凭据？已有任务将无法使用它。')) return; await post(`/dev/qa/provider-config/${providerState.credential_id}/disable`,{}); await providerStatus();});
 async function sessions() { const rows = await api('/dev/qa/sessions'); $('sessions').replaceChildren(...rows.map(row => { const o=document.createElement('option'); o.value=row.session_id; o.textContent=`${row.session_id} (${row.status})`; return o; })); if (sid) $('sessions').value=sid; }
 async function openSession(id) { if(busy()) throw Error('请先结束当前操作'); sid=id; $('sessions').value=sid; selectedTask=localStorage.getItem(`qa-workbench:task:${sid}`) || ''; localStorage.setItem('qa-workbench:last-session',sid); token=(await post(`/dev/qa/sessions/${sid}/token`,{})).token; blob=null; $('preview').removeAttribute('src'); $('audioInfo').textContent=''; await refresh(); }
 async function refresh() {
@@ -39,14 +44,16 @@ async function refresh() {
  $('state').textContent=JSON.stringify({task, recordings:recs.map(r=>({...r,browser_declared_mime:localStorage.getItem(key(`mime:${r.recording_id}`))})), playbacks:plays},null,2);
  $('prompt').textContent=content.prompt_text;
  const diagnostic=await api(`/dev/qa/sessions/${sid}/diagnostics${taskQuery()}`); jobs=diagnostic.jobs;
+ currentMode=diagnostic.mode; $('run').disabled=currentMode!=='mock'; $('authorizePaid').disabled=currentMode!=='qwen'; $('runPaid').disabled=currentMode!=='qwen';
  $('diagnostics').textContent=JSON.stringify(diagnostic,null,2);
  $('jobs').replaceChildren(...jobs.filter(j=>['FAILED','INVALID','UNKNOWN'].includes(j.status)).map(j=>{const o=document.createElement('option'); o.value=j.job_id; o.textContent=`${j.source}: ${j.status}`; return o;}));
- $('retryJob').disabled=!$('jobs').options.length;
+ $('retryJob').disabled=currentMode==='qwen' || !$('jobs').options.length;
  for (const [id,action] of Object.entries({start:'START_ATTEMPT',guide:'START_GUIDE',initial:'START_INITIAL_PROMPT',replay:'START_USER_REPLAY',retry:'RETRY_PLAYBACK',record:'START_RECORDING',submit:'SUBMIT_QA',redo:'REDO_ATTEMPT'})) $(id).disabled=!task.allowed_actions.includes(action);
  $('recoverPlay').disabled=!task.playback_in_progress || !!activePlay; $('cancel').disabled=!task.recording_in_progress;
  $('upload').disabled=!blob || !savedPending || !recs.some(r=>r.recording_id===savedPending.id && r.status==='STARTED');
  if(savedPending && recs.some(r=>r.recording_id===savedPending.id && r.status==='SAVED')) {localStorage.setItem(key('selected-recording'),savedPending.id); pending.delete(pendingKey()); blob=null;}
- for (const id of ['create','createTwo','open','tasks','useFile','run']) $(id).disabled=busy();
+ for (const id of ['create','createTwo','open','tasks','useFile']) $(id).disabled=busy();
+ $('run').disabled=busy() || currentMode!=='mock'; $('authorizePaid').disabled=busy() || currentMode!=='qwen'; $('runPaid').disabled=busy() || currentMode!=='qwen';
  if(busy()) { for(const id of ['record','upload','cancel','submit','redo']) $(id).disabled=true; }
  $('stopPlay').disabled=!activePlay; $('stopRecord').disabled=!recorder || recorder.state!=='recording';
 }
@@ -109,8 +116,8 @@ async function startRecording() {
   throw e;
  } finally { starting=false; await refresh(); }
 }
-bind('create',async()=>{const row=await post('/dev/qa/sessions',{}); await sessions(); await openSession(row.session_id);});
-bind('createTwo',async()=>{const row=await post('/dev/qa/sessions?count=2',{}); await sessions(); await openSession(row.session_id);});
+bind('create',async()=>{const row=await post(`/dev/qa/sessions?mode=${encodeURIComponent($('mode').value)}`,{}); await sessions(); await openSession(row.session_id);});
+bind('createTwo',async()=>{const row=await post(`/dev/qa/sessions?count=2&mode=${encodeURIComponent($('mode').value)}`,{}); await sessions(); await openSession(row.session_id);});
 $('tasks').addEventListener('change',()=>{if(busy()){ $('tasks').value=selectedTask; return; } selectedTask=$('tasks').value; $('preview').removeAttribute('src'); $('audioInfo').textContent=''; refresh().catch(showError);});
 bind('open',()=>openSession($('sessions').value)); bind('refresh',refresh);
 bind('start',async()=>{await post(`${base()}/attempt`,{}); await refresh();});
@@ -125,5 +132,7 @@ bind('upload',uploadPending);
 bind('cancel',async()=>{const row=recs.find(r=>r.status==='STARTED'); await post(`${base()}/recordings/${row.recording_id}/cancel`,{attempt_id:attempt}); pending.delete(pendingKey()); blob=null; await refresh();});
 bind('submit',async()=>{const selected=localStorage.getItem(key('selected-recording')); const row=recs.find(r=>r.status==='SAVED' && r.recording_id===selected) || recs.find(r=>r.status==='SAVED'); if(!row) throw Error('没有已保存录音'); const id=remember(`submit:${row.recording_id}`); const result=await post(`${base()}/submissions/qa`,{attempt_id:attempt,recording_id:row.recording_id,submit_request_id:id}); inform(`正式提交 ${result.status}：${result.submission_id}`); await refresh();});
 bind('run',async()=>{await post(`/dev/qa/sessions/${sid}/run-offline${taskQuery()}`,{}); await refresh();});
+bind('authorizePaid',async()=>{if(!confirm('确认录音已获授权且不是未经授权的儿童录音？')) return; if(!confirm('确认本次最多一次 ASR 和一次 LLM 的可能收费调用？')) return; await post(`/dev/qa/sessions/${sid}/authorize-paid${taskQuery()}`,{authorized_audio:true,confirm_paid:true}); await refresh();});
+bind('runPaid',async()=>{await post(`/dev/qa/sessions/${sid}/run-candidate${taskQuery()}`,{}); await refresh();});
 bind('retryJob',async()=>{const j=jobs.find(x=>x.job_id===$('jobs').value); if(!j) throw Error('请选择失败作业'); const unknown=j.status==='UNKNOWN'; if(!confirm(unknown?'结果未知；确认接受不确定性并授权重试？':'确认授权重试该作业？')) return; await post(`/dev/qa/sessions/${sid}/jobs/${j.job_id}/retry${taskQuery()}`,{accept_unknown:unknown}); await refresh();});
-(async()=>{await sessions(); const last=localStorage.getItem('qa-workbench:last-session'); if(last && [...$('sessions').options].some(o=>o.value===last)) await openSession(last);})().catch(showError);
+(async()=>{await providerStatus(); await sessions(); const last=localStorage.getItem('qa-workbench:last-session'); if(last && [...$('sessions').options].some(o=>o.value===last)) await openSession(last);})().catch(showError);

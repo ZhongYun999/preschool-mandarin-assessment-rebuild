@@ -266,3 +266,13 @@ def test_wrong_asr_or_prompt_never_dispatched():
     p = parameters()
     p["temperature"] = 2
     assert not valid_parameters(p)
+
+
+def test_injected_credential_failure_never_falls_back_to_environment():
+    def unavailable():
+        raise ValueError("private credential error")
+
+    adapter = QwenQAText(credential_provider=unavailable)
+    inputs = snapshot(adapter)
+    with pytest.raises(KnownFailure, match="LLM_CREDENTIALS_UNAVAILABLE"):
+        adapter.evaluate(inputs, requirement())

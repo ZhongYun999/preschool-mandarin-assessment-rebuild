@@ -41,8 +41,9 @@ def _failure(status, code):
 
 
 class QwenQAText:
-    def __init__(self, *, timeout=60, client_factory=None):
+    def __init__(self, *, timeout=60, client_factory=None, credential_provider=None):
         self.timeout, self._factory = timeout, client_factory
+        self._credential_provider = credential_provider
 
     def resolve_inputs(self, session, submission, revision, requirement):
         if (requirement.get("source"), requirement.get("version")) != (
@@ -94,7 +95,14 @@ class QwenQAText:
             or not identity.get("evaluation_id")
         ):
             raise KnownFailure("LLM_ASR_INPUT_INVALID")
-        key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        try:
+            key = (
+                self._credential_provider()
+                if self._credential_provider is not None
+                else os.environ.get("DASHSCOPE_API_KEY", "")
+            ).strip()
+        except Exception:  # noqa: BLE001 - credentials must not leak through diagnostics
+            raise KnownFailure("LLM_CREDENTIALS_UNAVAILABLE") from None
         if not key:
             raise KnownFailure("LLM_CREDENTIALS_MISSING")
         user_data = json.dumps(

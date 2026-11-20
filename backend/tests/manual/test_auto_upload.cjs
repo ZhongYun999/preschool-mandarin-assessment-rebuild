@@ -18,6 +18,7 @@ async function setup() {
   stop(){this.state='inactive'; this.ondataavailable({data:new Blob(['raw-bytes'],{type:this.mimeType})}); this.finished=this.onstop();}
  }
  const fetch = async (url, options={})=>{
+  if(url.endsWith('/provider-config')) return {ok:true,text:async()=>'{"configured":false}'};
   if(url.endsWith('/sessions')) return {ok:true,text:async()=> '[]'};
   if(url.endsWith('/recordings')) {starts++; return {ok:true,text:async()=>JSON.stringify({recording_id:'recording-1'})};}
   if(url.endsWith('/content')) {
