@@ -331,6 +331,7 @@ def test_old_submission_cannot_be_reviewed(db, client, context, tmp_path, ready_
             s,
             session_id=first["session_id"],
             session_task_id=first["session_task_id"],
+            expected_attempt_id=first["attempt_id"],
             redo_request_id="redo",
         )
         second = {**first, "attempt_id": attempt.attempt_id}

@@ -153,6 +153,7 @@ def test_redo_history_and_rollback(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     with Session(db) as s:
@@ -191,6 +192,7 @@ def test_concurrent_submit_redo(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
 
@@ -220,6 +222,7 @@ def test_closed_session_refuses_playback_submit_and_redo(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="x",
         ),
     ):

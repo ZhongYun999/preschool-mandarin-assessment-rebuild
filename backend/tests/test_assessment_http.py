@@ -236,6 +236,7 @@ def test_current_attempt_redo_close_and_completion(db, client, setup_api):
             s,
             session_id=UUID(sid),
             session_task_id=contexts[0]["session_task_id"],
+            expected_attempt_id=contexts[0]["attempt_id"],
             redo_request_id="redo",
         )
         replacement = {**contexts[0], "attempt_id": new.attempt_id}

@@ -39,7 +39,7 @@
 
 **T2｜整题重做【确定】**：显式重做是独立的废弃与替换事件。Session=`IN_PROGRESS` 且身份、当前 Attempt 和事务校验通过时，原子地使旧 Attempt 退出候选、创建新的 OPEN Attempt，并更新唯一当前指针。旧 OPEN 变为 ABANDONED；旧 SEALED 及 Submission 保留历史，但不可兜底。录音保存、正式提交、重做和整场关闭等数据库事务通过权威锁或等价原子机制串行裁决，不能中断事务造成半提交。
 
-Speaking / Dialogue 显式整题重做无需等待旧 Attempt 的录音、ASR、LLM、TTS 或播放结束；可以等待已经执行的数据库事务完成。旧操作的迟到结果不得影响新 Attempt 或成为当前有效成绩；同一 Attempt 内正常作答和播放与提交的冲突规则仍然有效。相同重做操作身份重传不得再次创建 Attempt；不同身份的过期请求不得废弃更新的 Attempt，历史操作结果须与当前 Attempt 区分。预期旧 Attempt 身份的原子比较是实现建议；公共 HTTP API 字段、必填性、兼容迁移及响应结构尚待确认。其他题型按各自已确认合同执行。
+Speaking / Dialogue 显式整题重做无需等待旧 Attempt 的录音、ASR、LLM、TTS 或播放结束；可以等待已经执行的数据库事务完成。旧操作的迟到结果不得影响新 Attempt 或成为当前有效成绩；同一 Attempt 内正常作答和播放与提交的冲突规则仍然有效。相同重做操作身份重传不得再次创建 Attempt；不同身份的过期请求不得废弃更新的 Attempt，历史操作结果须与当前 Attempt 区分。公共重做请求必须显式携带 `expected_attempt_id`（允许为 null），在锁内先检查历史操作再比较预期身份；成功响应中 `attempt_id` 是历史操作结果，`current_attempt_id` 是事务读取时的当前身份快照。缺失字段返回 422，预期身份过期返回 409，客户端读取状态后由用户决定是否重新发起。其他题型按各自已确认合同执行。
 
 **T3｜Submission 正式接受【确定】**：题型 Handler 验证阶段与已保存事实；同一事务固定输入清单、唯一 Submission、`OPEN→SEALED` 和后台可见的持久处理意图。失败不出现“SEALED 无 Submission”或“Worker 已领取半成品”。耗时外部调用必须在事务之外。`submit_request_id` 重传幂等；成功后儿童立即可以进行下一题。
 

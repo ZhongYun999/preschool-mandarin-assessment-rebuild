@@ -28,7 +28,7 @@
 ## 已确认的新决策：纠正早期文档中的旧表述
 
 - **显式重做：**一旦新 Attempt 已开始，旧 Submission 退出该题当前有效候选；新 Attempt 未正式提交就视为未完成。不能根据早期总体报告“保留旧有效提交”的表述做兜底；以 SW1.1 与题型专项为准。
-- **Speaking / Dialogue 显式重做许可：**高级模式的显式整题重做是独立的原子替换事件；Session `IN_PROGRESS` 且身份及事务校验通过时，无需等待旧录音、ASR、LLM、TTS 或播放。保留旧事实并隔离迟到结果；同请求幂等、过期请求不得废弃新 Attempt。公共 HTTP 兼容迁移及响应结构待确认。详见 [Speaking v1.1](design/VNEXT_SPEAKING_STATE_MACHINE_DESIGN_v1.1.md)、[Dialogue v1.0](design/VNEXT_DIALOGUE_STATE_MACHINE_DESIGN_v1.0.md)、[C1.0](design/VNEXT_CROSS_MODULE_IMPLEMENTATION_CONTRACT_C1.0.md) 和 [SW1.1](design/VNEXT_SESSION_WORKER_LIFECYCLE_SW1.1.md)。
+- **Speaking / Dialogue 显式重做许可：**高级模式的显式整题重做是独立的原子替换事件；Session `IN_PROGRESS` 且身份及事务校验通过时，无需等待旧录音、ASR、LLM、TTS 或播放。保留旧事实并隔离迟到结果；同请求幂等、过期请求不得废弃新 Attempt。公共 HTTP 重做请求须显式提供 `expected_attempt_id`，详见 [C1.0](design/VNEXT_CROSS_MODULE_IMPLEMENTATION_CONTRACT_C1.0.md) 和 [SW1.1](design/VNEXT_SESSION_WORKER_LIFECYCLE_SW1.1.md)，题型规则见 [Speaking v1.1](design/VNEXT_SPEAKING_STATE_MACHINE_DESIGN_v1.1.md) 与 [Dialogue v1.0](design/VNEXT_DIALOGUE_STATE_MACHINE_DESIGN_v1.0.md)。
 - **结算输入关闭：**`INPUT_CLOSED` 成功后，不存在恢复儿童操作或撤回的正常业务路径；后台可以继续评分、复核和正式结果固化。
 - **评分插件双阶段：**插件不是一个同时执行所有步骤的单一 `calculate()`；单题转换结果先落库，人工复核只覆盖采用分，整卷汇总算法允许再次运行。详见 S1.0。
 - **评测源按需调度：**评分插件声明所需原始评价；不需要开放题 ISE 时，不应产生 ISE 请求；旧系统的普通话规范评测旁路不能擅自触发。详见 E1.0。

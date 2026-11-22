@@ -348,6 +348,7 @@ def test_old_results_stay_with_original_submission_after_redo_and_close(db, cont
                     s,
                     session_id=context["session_id"],
                     session_task_id=context["session_task_id"],
+                    expected_attempt_id=context["attempt_id"],
                     redo_request_id="redo",
                 ).attempt_id
             newer = dict(context, attempt_id=new_attempt)

@@ -132,6 +132,7 @@ def test_order_missing_immutable_and_retry(db, two_tasks):
             s,
             session_id=first["session_id"],
             session_task_id=first["session_task_id"],
+            expected_attempt_id=first["attempt_id"],
             redo_request_id="late",
         )
     for sql, params in (
@@ -184,6 +185,7 @@ def test_redo_does_not_fallback_to_old_submission(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     with pytest.raises(IncompleteSession) as exc, Session(db) as s, s.begin():
@@ -283,6 +285,7 @@ def test_concurrent_redo_and_close(db, context):
                     s,
                     session_id=context["session_id"],
                     session_task_id=context["session_task_id"],
+                    expected_attempt_id=context["attempt_id"],
                     redo_request_id="redo",
                 ).attempt_id
         except ValueError:
@@ -323,10 +326,7 @@ def test_downgrade_preserves_close(db, context):
             command.downgrade(config, "0009_submission")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM close_manifests")) == 1
-        assert (
-            c.scalar(text("SELECT version_num FROM alembic_version"))
-            == "0018_recordings"
-        )
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
 
 
 @pytest.mark.parametrize("first_action", ["submit", "redo"])
@@ -349,6 +349,7 @@ def test_close_waits_for_authoritative_session_lock(db, context, first_action):
                     s,
                     session_id=context["session_id"],
                     session_task_id=context["session_task_id"],
+                    expected_attempt_id=context["attempt_id"],
                     redo_request_id="redo",
                 ).attempt_id
             held.set()
@@ -484,7 +485,11 @@ def test_unstarted_task_cannot_be_deleted_or_reassigned(db, two_tasks, tmp_path)
         assert (task.session_id, task.paper_id, task.paper_entry_id) == (sid, paper_id, entry_id)
         first = start_attempt(s, session_id=sid, session_task_id=task_id).attempt_id
         current = redo_attempt(
-            s, session_id=sid, session_task_id=task_id, redo_request_id="redo"
+            s,
+            session_id=sid,
+            session_task_id=task_id,
+            expected_attempt_id=first,
+            redo_request_id="redo",
         ).attempt_id
         assert task.current_attempt_id == current
         assert s.get(Attempt, first).status == "ABANDONED"
