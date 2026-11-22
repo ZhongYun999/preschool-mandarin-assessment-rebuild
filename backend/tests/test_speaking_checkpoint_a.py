@@ -220,7 +220,7 @@ def test_checkpoint_and_recovery(db, client, flow, guide):
     assert client.post(url, headers=headers, content=wav() + b"x").status_code == 409
     current = state()
     assert current["speaking"]["phase"] == "ANALYZING_AUDIO"
-    assert current["speaking"]["asr_status"] == "NOT_EXECUTED"
+    assert current["speaking"]["asr_status"] == "WAITING"
     assert current["speaking"]["total_duration_seconds"] == pytest.approx(100 / 16000)
     assert begin("next").status_code == 409
     with Session(db) as s:

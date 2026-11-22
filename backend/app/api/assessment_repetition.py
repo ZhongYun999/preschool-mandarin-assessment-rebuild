@@ -6,7 +6,7 @@ import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -27,6 +27,8 @@ from app.task_types import speaking
 from app.task_types.qa import submit_qa
 from app.task_types.repetition import submit_repetition
 from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
+from app.task_types.speaking import SpeakingSegment
+from app.task_types.speaking_asr import SpeakingASR
 
 router = APIRouter(prefix="/assessment/sessions/{session_id}/tasks/{task_id}")
 read_auth = Depends(require_read_session_access)
@@ -59,6 +61,58 @@ class RecordingSubmit(BaseModel):
     attempt_id: UUID
     recording_id: UUID
     submit_request_id: str = Field(min_length=1, pattern=r"\S")
+
+
+class ASRRetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    request_id: str = Field(min_length=1, pattern=r"\S")
+    expected_attempts: int = Field(ge=0)
+    accept_unknown: StrictBool = False
+
+
+@router.post("/segments/{segment_id}/asr/retry")
+def retry_asr(
+    session_id: UUID,
+    task_id: UUID,
+    segment_id: UUID,
+    body: ASRRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            job = db.scalar(
+                select(SpeakingASR)
+                .join(SpeakingSegment)
+                .where(
+                    SpeakingSegment.segment_id == segment_id,
+                    SpeakingSegment.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                raise ValueError("Recognition operation not found")
+            if job.retry_request_id == body.request_id:
+                if job.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"operation_id": job.operation_id, "status": job.status}
+            if job.attempts != body.expected_attempts or job.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Recognition is not available for retry")
+            if job.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            job.status, job.error_code = "WAITING", None
+            job.retry_request_id, job.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"operation_id": job.operation_id, "status": job.status}
+        except ValueError as exc:
+            conflict(exc)
 
 
 def view(row, session_id, task_id):

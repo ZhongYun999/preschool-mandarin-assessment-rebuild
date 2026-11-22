@@ -15,6 +15,7 @@ from app.scoring.models import FinalScoreResult
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
 from app.sessions.submission import Playback, Submission, _busy, _completed
 from app.task_types.speaking import SpeakingSegment
+from app.task_types.speaking_asr import SpeakingASR
 from app.taskbank.models import TaskRevision
 
 router = APIRouter(prefix="/assessment")
@@ -141,6 +142,22 @@ def session_state(
             if attempt and task_type == "speaking"
             else []
         )
+        recognition = (
+            {
+                row.segment_id: row
+                for row in db.scalars(
+                    select(SpeakingASR).where(SpeakingASR.attempt_id == attempt.attempt_id)
+                )
+            }
+            if attempt and task_type == "speaking"
+            else {}
+        )
+        pending_asr = [
+            recognition.get(segment.segment_id)
+            for segment in segments
+            if recognition.get(segment.segment_id) is None
+            or recognition[segment.segment_id].status != "READY"
+        ]
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
@@ -168,9 +185,15 @@ def session_state(
                     guide_complete
                     and initial_complete
                     and not playback_in_progress
-                    and not segments
+                    and not pending_asr
                 ):
                     actions.append("START_RECORDING")
+                if (
+                    pending_asr
+                    and pending_asr[-1] is not None
+                    and pending_asr[-1].status in ("FAILED", "UNKNOWN")
+                ):
+                    actions.append("RETRY_CURRENT_ASR")
             else:
                 actions = ["REDO_ATTEMPT"]
         tasks.append(
@@ -189,15 +212,22 @@ def session_state(
                 saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,
                 speaking={
-                    "phase": "ANALYZING_AUDIO"
-                    if segments
+                    "phase": "RECOVERABLE_ERROR"
+                    if pending_asr
+                    and pending_asr[-1] is not None
+                    and pending_asr[-1].status in ("FAILED", "UNKNOWN")
+                    else "ANALYZING_AUDIO"
+                    if pending_asr
                     else "RECEIVING_AUDIO"
                     if recording_in_progress
                     else "WAITING_INPUT"
                     if guide_complete and initial_complete
                     else "DELIVERING_INITIAL",
                     "checkpoint_a": bool(segments),
-                    "asr_status": "NOT_EXECUTED" if segments else None,
+                    "asr_status": recognition[segments[-1].segment_id].status
+                    if segments and segments[-1].segment_id in recognition
+                    else None,
+                    "checkpoint_b": bool(segments) and not pending_asr,
                     "pending_recording_ids": [
                         r.recording_id for r in recordings if r.status == "STARTED"
                     ],
@@ -208,6 +238,16 @@ def session_state(
                             "recording_id": s.recording_id,
                             "position": s.position,
                             "duration_seconds": s.duration_seconds,
+                            "asr": {
+                                "operation_id": recognition[s.segment_id].operation_id,
+                                "status": recognition[s.segment_id].status,
+                                "semantic": recognition[s.segment_id].semantic,
+                                "text": recognition[s.segment_id].transcript,
+                                "error_code": recognition[s.segment_id].error_code,
+                                "attempts": recognition[s.segment_id].attempts,
+                            }
+                            if s.segment_id in recognition
+                            else None,
                         }
                         for s in segments
                     ],

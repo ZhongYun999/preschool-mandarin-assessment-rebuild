@@ -10,6 +10,7 @@ from app.media.recording import Recording, recording_busy
 from app.sessions.assessment_session import _identity
 from app.sessions.submission import _busy, _completed, _locked, _open, _revision
 from app.task_types.simple_recording import _recording
+from app.task_types.speaking_asr import SpeakingASR
 
 
 class SpeakingSegment(Base):
@@ -55,7 +56,11 @@ def start(db: Session, *, session_id, session_task_id, attempt_id, request_id):
         or recording_busy(db, attempt_id)
         or db.scalar(
             select(SpeakingSegment.segment_id)
-            .where(SpeakingSegment.attempt_id == attempt_id)
+            .outerjoin(SpeakingASR, SpeakingASR.segment_id == SpeakingSegment.segment_id)
+            .where(
+                SpeakingSegment.attempt_id == attempt_id,
+                (SpeakingASR.status.is_(None) | (SpeakingASR.status != "READY")),
+            )
             .limit(1)
         )
         is not None
@@ -113,13 +118,23 @@ def save(
         media_type,
     )
     db.flush()
+    segment = SpeakingSegment(
+        segment_id=uuid4(),
+        attempt_id=attempt_id,
+        recording_id=recording_id,
+        position=max(positions, default=0) + 1,
+        duration_seconds=duration_seconds,
+    )
+    db.add(segment)
+    db.flush()
     db.add(
-        SpeakingSegment(
-            segment_id=uuid4(),
+        SpeakingASR(
+            segment_id=segment.segment_id,
             attempt_id=attempt_id,
             recording_id=recording_id,
-            position=max(positions, default=0) + 1,
-            duration_seconds=duration_seconds,
+            sha256=sha256,
+            status="WAITING",
+            attempts=0,
         )
     )
     db.flush()
