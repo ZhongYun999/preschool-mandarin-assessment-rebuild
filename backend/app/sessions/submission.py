@@ -153,6 +153,24 @@ def _busy(session, attempt_id):
     )
 
 
+def effective_replay_ids(session, attempt_id):
+    rows = session.scalars(select(Playback).where(Playback.attempt_id == attempt_id)).all()
+    completed_retries = {
+        row.retry_of_id
+        for row in rows
+        if row.kind == "TECHNICAL_RETRY" and row.status == "COMPLETED"
+    }
+    return sorted(
+        (
+            row.playback_id
+            for row in rows
+            if row.kind == "USER_REPLAY"
+            and (row.status == "COMPLETED" or row.playback_id in completed_retries)
+        ),
+        key=str,
+    )
+
+
 def start_playback(
     session: Session,
     *,
@@ -174,8 +192,12 @@ def start_playback(
             raise ValueError("Playback request conflicts")
         return previous
     revision = _revision(session, task)
-    if revision.task_type not in ("instruction", "repetition", "qa"):
+    if revision.task_type not in ("instruction", "repetition", "qa", "speaking"):
         raise ValueError("Unsupported task type")
+    if revision.task_type == "speaking" and kind == "USER_REPLAY":
+        raise ValueError("Speaking replay is not available")
+    if revision.task_type == "speaking" and recording_busy(session, attempt_id):
+        raise ValueError("Recording in progress")
     if revision.task_type in ("repetition", "qa") and recording_busy(session, attempt_id):
         raise ValueError("Recording in progress")
     if _busy(session, attempt_id):
@@ -191,6 +213,8 @@ def start_playback(
             or original.kind not in ("GUIDE", "INITIAL_PROMPT", "USER_REPLAY")
         ):
             raise ValueError("Invalid technical retry")
+        if revision.task_type == "speaking" and original.kind == "USER_REPLAY":
+            raise ValueError("Speaking replay is not available")
         role = "guide" if original.kind == "GUIDE" else "prompt"
         if (
             (original.kind == "GUIDE" and guide_done)
@@ -262,7 +286,7 @@ def finish_playback(
     result = "COMPLETED" if completed else "FAILED"
     if row.status != "STARTED":
         if row.status != result:
-            raise ValueError("Playback result conflicts")
+            raise ValueError(f"Playback result conflicts: current status {row.status}")
         return row
     row.status = result
     session.flush()
@@ -304,17 +328,7 @@ def submit_instruction(
         or _busy(session, attempt_id)
     ):
         raise ValueError("Input is not ready")
-    replay_ids = list(
-        session.scalars(
-            select(Playback.playback_id)
-            .where(
-                Playback.attempt_id == attempt_id,
-                Playback.kind == "USER_REPLAY",
-                Playback.status == "COMPLETED",
-            )
-            .order_by(Playback.playback_id)
-        )
-    )
+    replay_ids = effective_replay_ids(session, attempt_id)
     return _accept_submission(
         session,
         task=task,

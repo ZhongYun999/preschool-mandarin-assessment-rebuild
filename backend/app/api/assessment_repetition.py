@@ -19,9 +19,11 @@ from app.api.assessment_auth import (
 )
 from app.api.assessment_operations import conflict, task_row
 from app.api.teacher_api import get_db
+from app.media.audio_inspection import AudioError, AudioTools, inspect_audio
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, Attempt
+from app.task_types import speaking
 from app.task_types.qa import submit_qa
 from app.task_types.repetition import submit_repetition
 from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
@@ -83,11 +85,10 @@ def begin_recording(
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, _auth)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = start_recording(
-                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
-            )
+            action = speaking.start if revision.task_type == "speaking" else start_recording
+            row = action(db, session_id=session_id, session_task_id=task_id, **body.model_dump())
             return view(row, session_id, task_id)
         except ValueError as exc:
             conflict(exc)
@@ -105,9 +106,10 @@ def cancel(
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, _auth)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = cancel_recording(
+            action = speaking.cancel if revision.task_type == "speaking" else cancel_recording
+            row = action(
                 db,
                 session_id=session_id,
                 session_task_id=task_id,
@@ -127,7 +129,7 @@ def _preflight_upload(db, session_id, task_id, attempt_id, recording_id):
         owner = db.get(AssessmentSession, session_id)
         if (
             owner.status != "IN_PROGRESS"
-            or revision.task_type not in ("repetition", "qa")
+            or revision.task_type not in ("repetition", "qa", "speaking")
             or task.current_attempt_id != attempt_id
             or attempt is None
             or attempt.status != "OPEN"
@@ -136,17 +138,34 @@ def _preflight_upload(db, session_id, task_id, attempt_id, recording_id):
             or row.status not in ("STARTED", "SAVED")
         ):
             raise HTTPException(409, "Recording is not available for upload")
+        return revision.task_type, row.sha256
 
 
 def _persist_upload(
-    db, session_id, task_id, attempt_id, recording_id, credential_id, ref, sha, media_type, store
+    db,
+    session_id,
+    task_id,
+    attempt_id,
+    recording_id,
+    credential_id,
+    ref,
+    sha,
+    media_type,
+    store,
+    audio_info,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, credential_id)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = save_recording(
+            action = speaking.save if revision.task_type == "speaking" else save_recording
+            extra = (
+                {"duration_seconds": audio_info.duration_seconds}
+                if revision.task_type == "speaking"
+                else {}
+            )
+            row = action(
                 db,
                 session_id=session_id,
                 session_task_id=task_id,
@@ -156,6 +175,7 @@ def _persist_upload(
                 sha256=sha,
                 media_type=media_type,
                 store=store,
+                **extra,
             )
             return view(row, session_id, task_id)
         except ValueError as exc:
@@ -177,22 +197,35 @@ async def upload(
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if not re.fullmatch(r"audio/[a-z0-9][a-z0-9!#$&^_.+\-]*", media_type):
         raise HTTPException(422, "An audio media type is required")
-    await run_in_threadpool(_preflight_upload, db, session_id, task_id, attempt_id, recording_id)
+    task_type, existing_digest = await run_in_threadpool(
+        _preflight_upload, db, session_id, task_id, attempt_id, recording_id
+    )
     digest = hashlib.sha256()
     file, path = await run_in_threadpool(store.staging_file)
     size = 0
+    audio_tools = AudioTools() if task_type == "speaking" else None
     try:
         with file:
             async for chunk in request.stream():
                 if chunk:
+                    size += len(chunk)
+                    if audio_tools is not None and size > audio_tools.max_input_bytes:
+                        raise HTTPException(413, "Audio resource limit exceeded")
                     await run_in_threadpool(file.write, chunk)
                     digest.update(chunk)
-                    size += len(chunk)
             if not size:
                 raise HTTPException(422, "Recording is empty")
             await run_in_threadpool(file.flush)
             await run_in_threadpool(os.fsync, file.fileno())
         sha = digest.hexdigest()
+        if task_type == "speaking" and existing_digest is not None and sha != existing_digest:
+            raise HTTPException(409, "Recording upload conflicts")
+        audio_info = None
+        if task_type == "speaking":
+            try:
+                audio_info = await run_in_threadpool(inspect_audio, path, audio_tools)
+            except AudioError as exc:
+                raise HTTPException(422, f"Audio inspection failed: {exc.code}") from exc
         try:
             ref = await run_in_threadpool(store.commit, path, sha)
         except ValueError as exc:
@@ -209,6 +242,7 @@ async def upload(
             sha,
             media_type,
             store,
+            audio_info,
         )
     finally:
         path.unlink(missing_ok=True)
@@ -223,7 +257,7 @@ def list_recordings(
     db: Session = read_db,
 ):
     task, _, revision = task_row(db, session_id, task_id)
-    if revision.task_type not in ("repetition", "qa"):
+    if revision.task_type not in ("repetition", "qa", "speaking"):
         raise HTTPException(404, "Recordings not available")
     rows = (
         []
@@ -257,7 +291,7 @@ def recording_content(
             Recording.status == "SAVED",
         )
     )
-    if revision.task_type not in ("repetition", "qa") or row is None:
+    if revision.task_type not in ("repetition", "qa", "speaking") or row is None:
         raise HTTPException(404, "Recording not found")
     try:
         data = store.read(row.storage_ref, row.sha256)

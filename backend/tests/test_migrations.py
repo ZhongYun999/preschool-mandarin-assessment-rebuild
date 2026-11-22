@@ -38,7 +38,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0019_speaking_segments"
             )
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
@@ -58,7 +58,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             command.upgrade(config, "head")
             assert connection.scalar(functions) == 12
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0019_speaking_segments"
             )
             connection.commit()
     finally:
@@ -154,4 +154,4 @@ def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
             command.downgrade(config, "0004_paper_drafts")
         connection.rollback()
         assert [connection.execute(text(query)).all() for query in queries] == before
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0019_speaking_segments"
