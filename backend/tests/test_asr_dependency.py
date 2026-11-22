@@ -624,7 +624,11 @@ def test_redo_separates_old_and_new_evidence(db, client, dependency_flow, stage)
         assert execute_claim(db, claim(db, f, "test-asr", sources))
         old_claim = claim(db, f, "test-llm", sources)
     task_path = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
-    redo = client.post(task_path + "/redo", headers=f["headers"], json={"redo_request_id": "redo"})
+    redo = client.post(
+        task_path + "/redo",
+        headers=f["headers"],
+        json={"redo_request_id": "redo", "expected_attempt_id": f["attempt_id"]},
+    )
     assert redo.status_code == 200
     assert not execute_claim(db, old_claim)
     with Session(db) as s:
@@ -784,7 +788,9 @@ def test_late_old_llm_evidence_does_not_change_new_formal_result(db, client, dep
             task_path = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
             assert (
                 client.post(
-                    task_path + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                    task_path + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "redo", "expected_attempt_id": f["attempt_id"]},
                 ).status_code
                 == 200
             )
@@ -880,6 +886,7 @@ def test_redo_lock_serializes_before_asr_claim(db, dependency_flow):
                 s,
                 session_id=UUID(f["sid"]),
                 session_task_id=UUID(f["tasks"][0]["session_task_id"]),
+                expected_attempt_id=UUID(f["attempt_id"]),
                 redo_request_id="redo",
             )
             entered.set()

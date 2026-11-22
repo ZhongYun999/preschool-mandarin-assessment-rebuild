@@ -164,7 +164,14 @@ def flow(db, bank, tmp_path, client, monkeypatch):
             old_submission = submissions[0]
             base = f"{root}/tasks/{state['tasks'][0]['session_task_id']}"
             attempt = client.post(
-                base + "/redo", headers=headers, json={"redo_request_id": "redo"}
+                base + "/redo",
+                headers=headers,
+                json={
+                    "redo_request_id": "redo",
+                    "expected_attempt_id": client.get(root, headers=headers).json()["tasks"][0][
+                        "attempt_id"
+                    ],
+                },
             ).json()["attempt_id"]
             for kind in ("GUIDE", "INITIAL_PROMPT"):
                 row = client.post(
@@ -510,7 +517,9 @@ def test_http_close_competing_with_submit_or_redo(
             return client.post(root + "/close", headers=headers, json={"close_request_id": "close"})
         if name == "redo":
             return client.post(
-                task_root + "/redo", headers=headers, json={"redo_request_id": "redo"}
+                task_root + "/redo",
+                headers=headers,
+                json={"redo_request_id": "redo", "expected_attempt_id": submit_body["attempt_id"]},
             )
         return client.post(
             task_root + "/submissions/instruction", headers=headers, json=submit_body

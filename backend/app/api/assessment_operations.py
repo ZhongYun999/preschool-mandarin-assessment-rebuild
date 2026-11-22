@@ -56,6 +56,7 @@ class SubmitInput(Input):
 
 class RedoInput(Input):
     redo_request_id: str = Field(min_length=1, pattern=r"\S")
+    expected_attempt_id: UUID | None
 
 
 class CloseInput(Input):
@@ -311,11 +312,13 @@ def redo(
         confirm_write_access(db, session_id, _auth)
         task_row(db, session_id, task_id)
         try:
-            return attempt_view(
-                redo_attempt(
-                    db, session_id=session_id, session_task_id=task_id, **body.model_dump()
-                )
+            attempt = redo_attempt(
+                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
             )
+            return {
+                **attempt_view(attempt),
+                "current_attempt_id": db.get(SessionTask, task_id).current_attempt_id,
+            }
         except ValueError as exc:
             conflict(exc)
 

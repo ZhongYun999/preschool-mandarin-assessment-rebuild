@@ -272,7 +272,9 @@ def test_old_llm_result_cannot_change_new_final_result(db, client, pipeline):
             task_url = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
             assert (
                 client.post(
-                    task_url + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                    task_url + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "redo", "expected_attempt_id": f["attempt_id"]},
                 ).status_code
                 == 200
             )

@@ -243,6 +243,7 @@ def test_required_evidence_and_model_review(db, context, tmp_path):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
         new_context = {**context, "attempt_id": attempt.attempt_id}

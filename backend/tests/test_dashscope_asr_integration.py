@@ -227,7 +227,9 @@ def test_late_asr_after_redo_cannot_contaminate_result(db, client, flow):
             task_url = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
             assert (
                 client.post(
-                    task_url + "/redo", headers=f["headers"], json={"redo_request_id": "new"}
+                    task_url + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "new", "expected_attempt_id": f["attempt_id"]},
                 ).status_code
                 == 200
             )

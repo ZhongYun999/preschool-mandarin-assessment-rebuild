@@ -116,6 +116,7 @@ def test_old_unstarted_job_is_skipped_and_never_rescanned(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     adapter = FakeAdapter()
@@ -140,6 +141,7 @@ def test_redo_after_claim_before_dispatch_is_skipped(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     assert not execute_claim(db, work)
@@ -160,6 +162,7 @@ def test_redo_lock_serializes_before_claim(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             )
             held.set()
@@ -205,6 +208,7 @@ def test_closed_session_uses_manifest_candidate(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     newer = dict(context, attempt_id=aid)
@@ -263,6 +267,7 @@ def test_downgrade_wont_discard_skipped_facts(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     tick(db)
@@ -428,6 +433,7 @@ def test_claim_first_redo_waits_then_pre_dispatch_rechecks(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
 
