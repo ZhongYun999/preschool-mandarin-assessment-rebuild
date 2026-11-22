@@ -86,6 +86,8 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 `app.evaluation.worker.run_once()` 执行一轮有界调度，调用方需提供数据库 engine、评价合同 Registry、适配器映射、租约时长和批次大小，并按部署需要重复调用。当前没有生产评价适配器；空映射不会产生成功评价。已被重做取代且尚未跨过外发边界的作业会标记为 `SKIPPED`；跨过外发边界后的旧调用可能仍产生费用并保留历史结果。外呼结果不明的作业必须显式授权后才可重试。
 
+Speaking 过程识别与正式 Submission 评价独立：保存 Segment 后原子创建过程识别操作，Session 状态中返回操作身份与识别状态。当前没有常驻过程 ASR 调度器；部署方可在 `backend` 目录显式执行 `python -m app.task_types.speaking_asr_worker <operation_id> --region <region> --workspace <workspace>`。该命令会使用私有环境变量 `DASHSCOPE_API_KEY` 并可能产生费用，运行前须获得相应授权；本任务测试只使用离线替身。每次执行最多外发一次，不自动重试。租约过期但未跨外发边界可重新领取，跨过边界后保守记为 UNKNOWN。FAILED 可通过 Session 授权的 `POST /assessment/sessions/{session_id}/tasks/{task_id}/segments/{segment_id}/asr/retry` 明确恢复，JSON 包含 `attempt_id`、稳定 `request_id`、查询返回的 `expected_attempts`；UNKNOWN 还须明确传 `accept_unknown: true`。恢复后仍须执行 Worker，刷新页面不会自动重试或调用供应商。真实 Qwen 空文本目前缺少已确认的无语音语义，不作为 Checkpoint B；需供应商合同核实后再映射。
+
 ## 结算扫描入口
 
 `app.scoring.worker.run_settlement_once(engine, registry=registry, batch_size=100)` 推进数据库中有 `SettlementIntent` 和 `CloseManifest` 且状态为 `INPUT_CLOSED` 的 Session。`batch_size` 是单次查询的分页大小：每轮依次遍历符合条件的场次，逐场使用独立的 `READ COMMITTED` 事务；等待中的场次不会永久占住分页，已锁定场次留待下一轮。返回值包含 `completed`、`pending`、`skipped_locked` 和 `failures`；调用方须检查失败项。失败项包括 Session 身份、异常类型和代码位置，不包含可能敏感的异常内容。历史复核策略不能解释时，`pending` 中提供策略诊断，其他场次仍继续处理。

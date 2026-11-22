@@ -339,7 +339,7 @@ def test_downgrade_rejects_existing_data(db, ready):
             command.downgrade(config, "0007_tts_attempts")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM assessment_sessions")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0019_speaking_segments"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0020_speaking_asr"
 
 
 def test_concurrent_start_and_same_redo_are_idempotent(db, ready):
