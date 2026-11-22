@@ -72,6 +72,7 @@ Speaking 应在一条 Attempt 内支持多段录音、儿童反复主动求助�
 13. **重播不改变作答**：重播只读取当前应答的既有语音内容，完成后记入独立 `replay_count`；不重新生成问题、不增加求助、不改变录音/提交资格。
 14. **模式仅是外壳**：小程序 `child/advanced` 只影响哪些控件和诊断字段可见；切换不创建、删除、重置或重放任何业务事实。
 15. **LLM 仅校验技术有效性**：至少得到可解析 JSON 对象和有效的非空引导文本；不以句式、问号数量、字符级重复/相似性等内容质量规则阻断流程。
+16. **初始交付**：当前 Attempt 非空 GUIDE 先完整交付并确认，再完整交付 INITIAL_PROMPT；无引导语则直接交付题音。完成前不允许录音、求助、主动重播或提交；空录音求助仍须先完成初始交付。新 Attempt 不继承旧播放事实。
 
 ## 4. 生命周期、业务阶段与操作许可
 
@@ -90,6 +91,7 @@ SEALED ──[之后明确重新作答]───────> SEALED + SUPERSEDE
 
 | 阶段 | 从什么事实识别 |
 |---|---|
+| `DELIVERING_INITIAL` | 必要 GUIDE 或 INITIAL_PROMPT 尚未确认；由播放事实投影 |
 | `WAITING_INPUT` | Attempt OPEN，当前无未完成的独占操作 |
 | `RECEIVING_AUDIO` | 上传/持久化操作尚未确认完成 |
 | `ANALYZING_AUDIO` | 片段已保存，必要的 ASR 尚未完成 |
@@ -103,6 +105,7 @@ SEALED ──[之后明确重新作答]───────> SEALED + SUPERSEDE
 
 | 当前阶段 | 录音/提交片段 | 点击 `?` | 重新播放 | 结束本题 | 重新作答 | 查询/恢复 |
 |---|---|---|---|---|---|---|
+| `DELIVERING_INITIAL` | 暂停 | 暂停 | 暂停 | 暂停 | 允许显式申请 | 允许初始播放、确认及恢复 |
 | `WAITING_INPUT` | 允许 | 允许 | 有可用当前语音时允许 | 仅满足提交资格 | 高级模式显示入口 | 允许 |
 | `RECEIVING_AUDIO` | 暂停新操作 | 暂停 | 暂停 | 暂停 | 允许显式申请 | 允许 |
 | `ANALYZING_AUDIO` | 暂停 | 暂停 | 暂停 | 暂停 | 允许显式申请 | 允许 |
@@ -131,20 +134,20 @@ SEALED ──[之后明确重新作答]───────> SEALED + SUPERSEDE
 
 | 事件 | 前置条件/许可 | 必须产生或确认的事实 | 成功后 |
 |---|---|---|---|
-| `START_ATTEMPT` | SessionTask 允许开始作答 | 新 Attempt 身份 | `OPEN/WAITING_INPUT` |
-| `SUBMIT_SEGMENT` | `WAITING_INPUT`、当前无冲突操作 | 稳定 Segment 身份、可靠音频文件及引用 | Checkpoint A，进入必要识别 |
+| `START_ATTEMPT` | SessionTask 允许开始作答 | 新 Attempt 身份 | `OPEN/DELIVERING_INITIAL` |
+| `SUBMIT_SEGMENT` | 初始交付已确认、`WAITING_INPUT`、当前无冲突操作 | 稳定 Segment 身份、可靠音频文件及引用 | Checkpoint A，进入必要识别 |
 | `ASR_COMPLETED` | 对应 Segment/ASR 操作身份有效 | 真实文本或合法“无可识别内容”语义及证据 | Checkpoint B，回到 `WAITING_INPUT` |
 | `ASR_TECHNICAL_FAILURE` | 有相关 ASR 操作 | 失败类别、技术尝试与恢复信息 | 同一操作重试或可恢复错误 |
-| `REQUEST_HELP` | `WAITING_INPUT`，**允许没有录音** | 一条儿童主动点击对应的 HelpRequest、当前输入断点 | `GENERATING_GUIDANCE` |
+| `REQUEST_HELP` | 初始交付已确认、`WAITING_INPUT`，**允许没有录音** | 一条儿童主动点击对应的 HelpRequest、当前输入断点 | `GENERATING_GUIDANCE` |
 | `GUIDANCE_GENERATED` | 归属及输入断点仍有效 | 引导文本与请求关联 | Checkpoint C，进入交付 |
 | `GUIDANCE_DELIVERED` | 对应引导成功完整播放 | 交付确认、一次有效求助 | Checkpoint D，回到 `WAITING_INPUT` |
-| `REQUEST_REPLAY` / `REPLAY_CURRENT_PROMPT` | `WAITING_INPUT`、无冲突操作且当前语音已存在 | 稳定的本次用户重播操作 ID、被重播语音引用、来源为主动重播 | 独占播放，临时冻结其他作答操作 |
+| `REQUEST_REPLAY` / `REPLAY_CURRENT_PROMPT` | 初始交付已确认、`WAITING_INPUT`、无冲突操作且当前语音已存在 | 稳定的本次用户重播操作 ID、被重播语音引用、来源为主动重播 | 独占播放，临时冻结其他作答操作 |
 | `REPLAY_DELIVERED` | 该次主动重播完整播放且确认 | 一次有效重播交付事实；不修改原引导/录音 | `replay_count` 可增加一次，回 `WAITING_INPUT` |
 | `REPLAY_FAILED` | 播放失败或无法完成交付 | 失败事实，不计有效重播 | 解除播放占用，保留原作答进度 |
 | `HELP_FAILED_VOIDED` | 生成/交付确认失败且自动恢复已停止 | 本次求助作废，保留审计事实 | 恢复最近可靠业务断点，解除占用 |
 | `REQUEST_FINISH` | `WAITING_INPUT`，当前提交条件满足 | 开始最终提交校验 | 进入原子封存流程 |
 | `SUBMISSION_ACCEPTED` | 同一事务复核全部条件成功 | 固定输入清单、Submission、Attempt `SEALED` | 允许下一题，后台待处理 |
-| `RESTART_ATTEMPT` | 显式触发，Session `IN_PROGRESS`，身份与当前 Attempt 校验通过；冲突事务串行裁决 | 旧作答退出候选、新 Attempt 原子创建 | 新 Attempt `WAITING_INPUT` |
+| `RESTART_ATTEMPT` | 显式触发，Session `IN_PROGRESS`，身份与当前 Attempt 校验通过；冲突事务串行裁决 | 旧作答退出候选、新 Attempt 原子创建 | 新 Attempt `DELIVERING_INITIAL` |
 | `RESUME_ATTEMPT` | 请求者有权访问 | 读取原有事实与操作，重新计算合法动作 | 不自动创建 Attempt、Segment、HelpRequest 或 Submission |
 
 任何成功落库的异步结果，都必须核验所属 Attempt、操作身份和必要的输入进度。废弃/已替代旧 Attempt 的迟到结果不得影响新 Attempt。
@@ -285,6 +288,7 @@ LLM/TTS/交付经自动技术恢复仍未成功时，记录本次求助失败并
 ```
 
 - 第一次正常播放题目、求助产生引导后的正常首次播放，不算重播；**只有主动点击“重新播放”才可能进入此计数**。
+- 初始交付及其技术恢复不计主动重播；同一次 USER_REPLAY 的技术恢复完成后只计一次，技术尝试及 HTTP 重传不独立计数。
 - 每次被接受的主动重播点击对应独立稳定的 `replay_request_id`；同 ID 的网络重传或播放完成确认重传只认同一操作，不重复计数。
 - 完整播放并被确认才算一次有效重播。播放失败、系统重试、尚未完成交付的操作不计数；恢复时不通过 `replay_count += 1/-=1` 做不可审计的补偿。
 - 重播始终播放**已有问题/引导**，不调用 LLM 重新生成内容；复用已确定语音资源，不新增 HelpRequest，也不增加 `effective_help_count`。
@@ -447,6 +451,8 @@ Session 为 `IN_PROGRESS` 且身份、当前 Attempt 与事务合法性校验通
 47. 录音、ASR、LLM、TTS、引导及重播期间可显式申请重做；与保存和关闭事务竞争时保持原子性，关闭成功后拒绝新的重做。
 48. 同一重做身份重传不创建第二个 Attempt；不同身份的过期请求不能废弃更新的 Attempt，历史操作结果与当前 Attempt 可区分。
 49. 旧事实保留、迟到结果不影响新 Attempt；刷新只恢复权威状态，新 Attempt 不继承旧事实且未提交时不回退旧候选。
+50. 非空 GUIDE → INITIAL_PROMPT 依次完整确认；无 GUIDE 仅交付 INITIAL_PROMPT。交付未完成禁止录音、求助与主动重播；重做后新 Attempt 重新交付。
+51. 播放失败、未知 STARTED 手动恢复、原回执重传与迟到失败均遵循 ST1.0 公共播放恢复合同，不伪造完成，不自动废弃 Attempt。
 
 ## 13. 实施约束、待协同事项与文档更新
 

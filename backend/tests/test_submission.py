@@ -272,7 +272,7 @@ def test_concurrent_duplicate_submissions_have_one_intent(db, context):
         assert s.scalar(select(func.count()).select_from(EvaluationIntent)) == 1
 
 
-def test_technical_retry_is_not_replay(db, context):
+def test_technical_retry_completes_original_replay_once(db, context):
     deliver(db, context)
     with Session(db) as s, s.begin():
         replay = start(s, context, "USER_REPLAY", "r").playback_id
@@ -280,7 +280,7 @@ def test_technical_retry_is_not_replay(db, context):
         retry = start(s, context, "TECHNICAL_RETRY", "retry", replay).playback_id
         finish(s, context, retry)
         result = submit(s, context)
-        assert result.inputs["replay_playback_ids"] == []
+        assert result.inputs["replay_playback_ids"] == [str(replay)]
 
 
 def test_no_guide_and_no_evaluation_requirements(db, bank, tmp_path):

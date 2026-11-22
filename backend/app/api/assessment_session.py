@@ -14,6 +14,7 @@ from app.papers.paper import PaperEntry
 from app.scoring.models import FinalScoreResult
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
 from app.sessions.submission import Playback, Submission, _busy, _completed
+from app.task_types.speaking import SpeakingSegment
 from app.taskbank.models import TaskRevision
 
 router = APIRouter(prefix="/assessment")
@@ -35,6 +36,7 @@ class TaskState(BaseModel):
     recording_in_progress: bool
     saved_recording_ids: list[UUID]
     allowed_actions: list[str]
+    speaking: dict | None = None
 
 
 class SessionState(BaseModel):
@@ -118,7 +120,7 @@ def session_state(
         )
         recordings = (
             list(db.scalars(select(Recording).where(Recording.attempt_id == attempt.attempt_id)))
-            if attempt and task_type in ("repetition", "qa")
+            if attempt and task_type in ("repetition", "qa", "speaking")
             else []
         )
         recording_in_progress = any(r.status == "STARTED" for r in recordings)
@@ -128,6 +130,17 @@ def session_state(
         )
         initial_complete = bool(attempt and _completed(db, attempt.attempt_id, "INITIAL_PROMPT"))
         playback_in_progress = bool(attempt and _busy(db, attempt.attempt_id))
+        segments = (
+            list(
+                db.scalars(
+                    select(SpeakingSegment)
+                    .where(SpeakingSegment.attempt_id == attempt.attempt_id)
+                    .order_by(SpeakingSegment.position)
+                )
+            )
+            if attempt and task_type == "speaking"
+            else []
+        )
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
@@ -144,6 +157,20 @@ def session_state(
                             actions.append(
                                 "SUBMIT_REPETITION" if task_type == "repetition" else "SUBMIT_QA"
                             )
+            elif attempt.status == "OPEN" and task_type == "speaking":
+                actions = _instruction_actions(db, attempt, guide_text, task.paper_entry_id)
+                actions = [
+                    a for a in actions if a not in ("START_USER_REPLAY", "SUBMIT_INSTRUCTION")
+                ]
+                if recording_in_progress:
+                    actions = ["UPLOAD_RECORDING", "CANCEL_RECORDING", "REDO_ATTEMPT"]
+                elif (
+                    guide_complete
+                    and initial_complete
+                    and not playback_in_progress
+                    and not segments
+                ):
+                    actions.append("START_RECORDING")
             else:
                 actions = ["REDO_ATTEMPT"]
         tasks.append(
@@ -161,6 +188,32 @@ def session_state(
                 recording_in_progress=recording_in_progress,
                 saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,
+                speaking={
+                    "phase": "ANALYZING_AUDIO"
+                    if segments
+                    else "RECEIVING_AUDIO"
+                    if recording_in_progress
+                    else "WAITING_INPUT"
+                    if guide_complete and initial_complete
+                    else "DELIVERING_INITIAL",
+                    "checkpoint_a": bool(segments),
+                    "asr_status": "NOT_EXECUTED" if segments else None,
+                    "pending_recording_ids": [
+                        r.recording_id for r in recordings if r.status == "STARTED"
+                    ],
+                    "total_duration_seconds": sum(s.duration_seconds for s in segments),
+                    "segments": [
+                        {
+                            "segment_id": s.segment_id,
+                            "recording_id": s.recording_id,
+                            "position": s.position,
+                            "duration_seconds": s.duration_seconds,
+                        }
+                        for s in segments
+                    ],
+                }
+                if attempt and task_type == "speaking"
+                else None,
             )
         )
     expected_entries = set(
