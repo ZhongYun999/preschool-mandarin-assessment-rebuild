@@ -16,10 +16,12 @@ from test_qa_http import wav
 from test_taskbank import CONTENT, write
 from test_teacher_api import AUTH
 
+from app.api import assessment_repetition
 from app.api.assessment_repetition import get_recording_store
 from app.api.teacher_api import get_audio_store
 from app.api.teacher_review import get_scoring_registry
 from app.main import app
+from app.media.audio_inspection import AudioError, AudioTools
 from app.media.fixed_audio import AudioStore, prepare_audio
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
@@ -29,6 +31,91 @@ from app.scoring.registry import Registry
 from app.task_types.speaking import SpeakingSegment
 
 pytest_plugins = ("test_teacher_api",)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_code"),
+    [
+        ("ffprobe_missing", 503, "AUDIO_TOOL_UNAVAILABLE"),
+        ("ffmpeg_missing", 503, "AUDIO_TOOL_UNAVAILABLE"),
+        ("timeout", 504, "AUDIO_TOOL_TIMEOUT"),
+        ("tool_failed", 500, "AUDIO_TOOL_FAILED"),
+        ("resource_limit", 413, "AUDIO_RESOURCE_LIMIT"),
+        ("decoded_limit", 413, "AUDIO_RESOURCE_LIMIT"),
+        ("invalid_audio", 422, "AUDIO_UNRECOGNIZED"),
+        ("empty_audio", 422, "AUDIO_UNRECOGNIZED"),
+        ("damaged_audio", 422, "AUDIO_DECODE_FAILED"),
+    ],
+)
+def test_audio_errors_preserve_recording_and_allow_retry(
+    db, client, flow, monkeypatch, failure, expected_status, expected_code
+):
+    root, base, headers, aid = flow(None)
+    pid = client.post(
+        base + "/playbacks",
+        headers=headers,
+        json={"attempt_id": aid, "request_id": "p", "kind": "INITIAL_PROMPT"},
+    ).json()["playback_id"]
+    assert (
+        client.post(
+            base + f"/playbacks/{pid}/finish",
+            headers=headers,
+            json={"attempt_id": aid, "completed": True},
+        ).status_code
+        == 200
+    )
+    rid = client.post(
+        base + "/recordings", headers=headers, json={"attempt_id": aid, "request_id": "rec"}
+    ).json()["recording_id"]
+    url = base + f"/recordings/{rid}/content"
+    upload_headers = {**headers, "X-Attempt-Id": aid, "Content-Type": "audio/wav"}
+    with monkeypatch.context() as patch:
+        if failure == "ffprobe_missing":
+            patch.setattr(
+                assessment_repetition,
+                "AudioTools",
+                lambda: AudioTools(ffprobe="nonexistent-ffprobe-for-test"),
+            )
+        elif failure == "ffmpeg_missing":
+            patch.setattr(
+                assessment_repetition,
+                "AudioTools",
+                lambda: AudioTools(ffmpeg="nonexistent-ffmpeg-for-test"),
+            )
+        elif failure == "timeout":
+
+            def timeout(*args, **kwargs):
+                raise subprocess.TimeoutExpired("test-audio-tool", 1)
+
+            patch.setattr(subprocess, "run", timeout)
+        elif failure in ("tool_failed", "decoded_limit"):
+
+            def tool_failed(*args, **kwargs):
+                raise AudioError(
+                    "AUDIO_TOOL_FAILED" if failure == "tool_failed" else "AUDIO_RESOURCE_LIMIT"
+                )
+
+            patch.setattr(assessment_repetition, "inspect_audio", tool_failed)
+        elif failure == "resource_limit":
+            patch.setattr(
+                assessment_repetition, "AudioTools", lambda: AudioTools(max_input_bytes=10)
+            )
+        content = b"invalid audio" if failure == "invalid_audio" else wav()
+        if failure == "empty_audio":
+            content = b""
+        if failure == "damaged_audio":
+            content = content[:-50]
+        response = client.post(url, headers=upload_headers, content=content)
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+    with Session(db) as s:
+        assert s.get(Recording, UUID(rid)).status == "STARTED"
+        assert s.scalar(select(SpeakingSegment)) is None
+    assert not client.get(root, headers=headers).json()["tasks"][0]["speaking"]["checkpoint_a"]
+    assert client.post(url, headers=upload_headers, content=wav()).status_code == 200
+    with Session(db) as s:
+        assert s.get(Recording, UUID(rid)).status == "SAVED"
+        assert len(s.scalars(select(SpeakingSegment)).all()) == 1
 
 
 @pytest.fixture

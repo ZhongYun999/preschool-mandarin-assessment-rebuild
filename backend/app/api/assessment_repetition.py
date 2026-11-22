@@ -210,10 +210,12 @@ async def upload(
                 if chunk:
                     size += len(chunk)
                     if audio_tools is not None and size > audio_tools.max_input_bytes:
-                        raise HTTPException(413, "Audio resource limit exceeded")
+                        raise HTTPException(413, detail={"code": "AUDIO_RESOURCE_LIMIT"})
                     await run_in_threadpool(file.write, chunk)
                     digest.update(chunk)
             if not size:
+                if audio_tools is not None:
+                    raise HTTPException(422, detail={"code": "AUDIO_UNRECOGNIZED"})
                 raise HTTPException(422, "Recording is empty")
             await run_in_threadpool(file.flush)
             await run_in_threadpool(os.fsync, file.fileno())
@@ -225,7 +227,28 @@ async def upload(
             try:
                 audio_info = await run_in_threadpool(inspect_audio, path, audio_tools)
             except AudioError as exc:
-                raise HTTPException(422, f"Audio inspection failed: {exc.code}") from exc
+                if exc.code in {
+                    "AUDIO_UNRECOGNIZED",
+                    "AUDIO_NO_STREAM",
+                    "AUDIO_METADATA_INCOMPLETE",
+                    "AUDIO_DECODE_FAILED",
+                    "AUDIO_STREAM_CORRUPT",
+                }:
+                    status, code = 422, exc.code
+                elif exc.code == "AUDIO_RESOURCE_LIMIT":
+                    status, code = 413, exc.code
+                elif exc.code == "AUDIO_TOOL_TIMEOUT":
+                    status, code = 504, exc.code
+                elif exc.code == "AUDIO_TOOL_UNAVAILABLE":
+                    status, code = 503, exc.code
+                else:
+                    status = 500
+                    code = (
+                        "AUDIO_TOOL_FAILED"
+                        if exc.code == "AUDIO_TOOL_FAILED"
+                        else "AUDIO_INSPECTION_FAILED"
+                    )
+                raise HTTPException(status, detail={"code": code}) from exc
         try:
             ref = await run_in_threadpool(store.commit, path, sha)
         except ValueError as exc:
