@@ -160,10 +160,16 @@ def _busy(session, attempt_id):
 
 def effective_replay_ids(session, attempt_id):
     rows = session.scalars(select(Playback).where(Playback.attempt_id == attempt_id)).all()
+    originals = {row.playback_id: row for row in rows if row.kind == "USER_REPLAY"}
     completed_retries = {
         row.retry_of_id
         for row in rows
-        if row.kind == "TECHNICAL_RETRY" and row.status == "COMPLETED"
+        if row.kind == "TECHNICAL_RETRY"
+        and row.status == "COMPLETED"
+        and row.retry_of_id in originals
+        and originals[row.retry_of_id].status == "FAILED"
+        and (row.audio_id, row.guidance_audio_id)
+        == (originals[row.retry_of_id].audio_id, originals[row.retry_of_id].guidance_audio_id)
     }
     return sorted(
         (
@@ -202,18 +208,22 @@ def start_playback(
             if previous.guidance_audio_id
             else None
         )
+        previous_root = (
+            session.get(Playback, previous.retry_of_id) if previous.retry_of_id else None
+        )
+        replay_identity = previous.kind == "USER_REPLAY" or (
+            previous_root is not None and previous_root.kind == "USER_REPLAY"
+        )
         if (
             previous.kind,
             previous.retry_of_id,
-            previous_audio.help_request_id if previous_audio else None,
+            previous_audio.help_request_id if previous_audio and not replay_identity else None,
         ) != (kind, retry_of_id, help_request_id):
             raise ValueError("Playback request conflicts")
         return previous
     revision = _revision(session, task)
     if revision.task_type not in ("instruction", "repetition", "qa", "speaking"):
         raise ValueError("Unsupported task type")
-    if revision.task_type == "speaking" and kind == "USER_REPLAY":
-        raise ValueError("Speaking replay is not available")
     if revision.task_type == "speaking" and recording_busy(session, attempt_id):
         raise ValueError("Recording in progress")
     if revision.task_type in ("repetition", "qa") and recording_busy(session, attempt_id):
@@ -222,6 +232,52 @@ def start_playback(
         raise ValueError("Playback in progress")
     guide_done = not revision.guide_text or _completed(session, attempt_id, "GUIDE")
     initial_done = _completed(session, attempt_id, "INITIAL_PROMPT")
+    original = session.get(Playback, retry_of_id) if retry_of_id else None
+    if revision.task_type == "speaking" and (
+        kind == "USER_REPLAY"
+        or (kind == "TECHNICAL_RETRY" and original is not None and original.kind == "USER_REPLAY")
+    ):
+        from app.media.fixed_audio import AudioStore
+        from app.task_types.speaking import replay_allowed, replay_frozen_resource, replay_target
+        from app.task_types.speaking_guidance import GuidanceAudio
+
+        if help_request_id is not None or not replay_allowed(session, attempt_id, revision):
+            raise ValueError("Speaking replay is not allowed in this stage")
+        if kind == "USER_REPLAY":
+            if retry_of_id is not None:
+                raise ValueError("Unexpected retry identity")
+            _, audio, _ = replay_target(session, task, attempt_id)
+            if audio is None:
+                raise ValueError("Replay audio unavailable")
+            audio_id = audio.audio_id if isinstance(audio, FixedAudio) else None
+            guidance_audio_id = audio.audio_id if isinstance(audio, GuidanceAudio) else None
+        else:
+            if (
+                original.attempt_id != attempt_id
+                or original.status != "FAILED"
+                or session.scalar(
+                    select(Playback.playback_id).where(
+                        Playback.retry_of_id == original.playback_id, Playback.status == "COMPLETED"
+                    )
+                )
+                is not None
+            ):
+                raise ValueError("Invalid replay technical retry")
+            audio_id, guidance_audio_id = original.audio_id, original.guidance_audio_id
+        row = Playback(
+            playback_id=uuid4(),
+            attempt_id=attempt_id,
+            request_id=request_id,
+            kind=kind,
+            status="STARTED",
+            audio_id=audio_id,
+            guidance_audio_id=guidance_audio_id,
+            retry_of_id=retry_of_id,
+        )
+        replay_frozen_resource(session, task, attempt_id, row, store or AudioStore())
+        session.add(row)
+        session.flush()
+        return row
     if kind == "GUIDANCE" or (kind == "TECHNICAL_RETRY" and help_request_id is not None):
         from app.media.fixed_audio import AudioStore
         from app.task_types.speaking_guidance import GuidanceAudio, active_help
@@ -372,6 +428,33 @@ def finish_playback(
     if row.status != "STARTED":
         if row.status != result:
             raise ValueError(f"Playback result conflicts: current status {row.status}")
+        return row
+    original = session.get(Playback, row.retry_of_id) if row.retry_of_id else None
+    if (
+        completed
+        and _revision(session, task).task_type == "speaking"
+        and (
+            row.kind == "USER_REPLAY"
+            or (
+                row.kind == "TECHNICAL_RETRY"
+                and original is not None
+                and original.kind == "USER_REPLAY"
+            )
+        )
+    ):
+        from app.media.fixed_audio import AudioStore
+        from app.task_types.speaking import replay_frozen_resource
+
+        if row.kind == "TECHNICAL_RETRY" and (
+            original.attempt_id != attempt_id
+            or original.status != "FAILED"
+            or (row.audio_id, row.guidance_audio_id)
+            != (original.audio_id, original.guidance_audio_id)
+        ):
+            raise ValueError("Replay retry identity mismatch")
+        replay_frozen_resource(session, task, attempt_id, row, store or AudioStore())
+        row.status = result
+        session.flush()
         return row
     if completed and row.guidance_audio_id is not None:
         from app.media.fixed_audio import AudioStore

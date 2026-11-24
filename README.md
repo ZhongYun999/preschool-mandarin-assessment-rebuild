@@ -92,6 +92,8 @@ Speaking 主动求助使用 `POST /assessment/sessions/{session_id}/tasks/{task_
 
 Checkpoint C 后生成独立的引导音频操作，Session 状态返回其 `audio_id`。部署方获得调用授权后，可在 `backend` 目录执行 `python -m app.task_types.speaking_tts_worker <audio_id> --config-json '<JSON>'`；JSON 明确提供 `provider`、`model`、`voice`、`version`、`speed`、`format`、`sample_rate` 及所需 `region`/`workspace`，不得包含凭据。CosyVoice 适配器要求 `provider` 为 `dashscope`、`version` 为 `cosyvoice-sdk-v2`、格式为 `wav`，API Key 仅从后端私有环境读取。该命令可能产生费用，本轮测试没有外呼。失败可通过 `/help-requests/{help_id}/audio/retry` 显式恢复，参数为 `attempt_id`、`request_id`、`expected_attempts`，UNKNOWN 额外要求 `accept_unknown: true`；恢复后仍须显式运行 Worker。音频就绪不代表已交付：客户端须使用公共 Playback 的 `GUIDANCE` 及对应 `help_request_id` 创建播放，并以相同 Playback 身份确认完整播放，服务端在同一事务中形成 Checkpoint D。实际播放失败后使用原播放身份创建 `TECHNICAL_RETRY`，复用原音频。
 
+Speaking 主动重播使用公共 Playback 的 `USER_REPLAY` 和稳定 `request_id`，无需客户端指定音频：服务端选择本 Attempt 最近成功交付的引导；没有引导时选择发布的初始题音。失败后可使用 `TECHNICAL_RETRY` 的 `retry_of_id` 指向原始重播并复用其音频。Session 状态提供当前目标、可用性、活动重播及从完整交付事实推导的 `replay_count`；首次交付、失败及技术重试不会单独增加计数。
+
 ## 结算扫描入口
 
 `app.scoring.worker.run_settlement_once(engine, registry=registry, batch_size=100)` 推进数据库中有 `SettlementIntent` 和 `CloseManifest` 且状态为 `INPUT_CLOSED` 的 Session。`batch_size` 是单次查询的分页大小：每轮依次遍历符合条件的场次，逐场使用独立的 `READ COMMITTED` 事务；等待中的场次不会永久占住分页，已锁定场次留待下一轮。返回值包含 `completed`、`pending`、`skipped_locked` 和 `failures`；调用方须检查失败项。失败项包括 Session 身份、异常类型和代码位置，不包含可能敏感的异常内容。历史复核策略不能解释时，`pending` 中提供策略诊断，其他场次仍继续处理。

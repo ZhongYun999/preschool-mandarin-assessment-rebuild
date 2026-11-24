@@ -8,13 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.assessment_auth import assessment_read_db, require_read_session_access
-from app.media.fixed_audio import FixedAudio
+from app.api.teacher_api import get_audio_store
+from app.media.fixed_audio import AudioStore, FixedAudio
 from app.media.recording import Recording
 from app.papers.paper import PaperEntry
 from app.scoring.models import FinalScoreResult
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
-from app.sessions.submission import Playback, Submission, _busy, _completed
-from app.task_types.speaking import SpeakingSegment
+from app.sessions.submission import Playback, Submission, _busy, _completed, effective_replay_ids
+from app.task_types.speaking import SpeakingSegment, replay_frozen_resource, replay_target
 from app.task_types.speaking_asr import SpeakingASR
 from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest, active_help
 from app.taskbank.models import TaskRevision
@@ -22,6 +23,7 @@ from app.taskbank.models import TaskRevision
 router = APIRouter(prefix="/assessment")
 authorized_dependency = Depends(require_read_session_access)
 read_db_dependency = Depends(assessment_read_db)
+audio_store_dependency = Depends(get_audio_store)
 
 
 class TaskState(BaseModel):
@@ -99,6 +101,7 @@ def session_state(
     response: Response,
     authorized: UUID = authorized_dependency,
     db: Session = read_db_dependency,
+    store: AudioStore = audio_store_dependency,
 ):
     owner = db.get(AssessmentSession, authorized)
     rows = db.execute(
@@ -200,6 +203,43 @@ def session_state(
             if delivered
             else None
         )
+        replay_source, replay_audio, replay_help = (None, None, None)
+        replay_available = False
+        replay_rows, active_replay, replay_retry_ids = [], None, []
+        if attempt and task_type == "speaking":
+            replay_source, replay_audio, replay_help = replay_target(db, task, attempt.attempt_id)
+            if replay_audio is not None:
+                target = Playback(
+                    audio_id=replay_audio.audio_id if replay_source == "INITIAL_PROMPT" else None,
+                    guidance_audio_id=replay_audio.audio_id
+                    if replay_source == "GUIDANCE"
+                    else None,
+                )
+                try:
+                    replay_frozen_resource(db, task, attempt.attempt_id, target, store)
+                    replay_available = True
+                except ValueError:
+                    pass
+            playback_rows = list(
+                db.scalars(select(Playback).where(Playback.attempt_id == attempt.attempt_id))
+            )
+            roots = {p.playback_id: p for p in playback_rows if p.kind == "USER_REPLAY"}
+            replay_rows = [
+                p
+                for p in playback_rows
+                if p.kind == "USER_REPLAY"
+                or (p.kind == "TECHNICAL_RETRY" and p.retry_of_id in roots)
+            ]
+            active_replay = next((p for p in replay_rows if p.status == "STARTED"), None)
+            completed_ids = set(effective_replay_ids(db, attempt.attempt_id))
+            for original in roots.values():
+                if original.status != "FAILED" or original.playback_id in completed_ids:
+                    continue
+                try:
+                    replay_frozen_resource(db, task, attempt.attempt_id, original, store)
+                    replay_retry_ids.append(original.playback_id)
+                except ValueError:
+                    pass
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
@@ -221,6 +261,8 @@ def session_state(
                 actions = [
                     a for a in actions if a not in ("START_USER_REPLAY", "SUBMIT_INSTRUCTION")
                 ]
+                if guide_complete and initial_complete:
+                    actions = [a for a in actions if a != "RETRY_PLAYBACK"]
                 if help_request is not None:
                     actions = ["REDO_ATTEMPT"]
                     if help_request.status in ("FAILED", "UNKNOWN"):
@@ -244,6 +286,10 @@ def session_state(
                 ):
                     actions.append("START_RECORDING")
                     actions.append("REQUEST_HELP")
+                    if replay_available:
+                        actions.append("START_USER_REPLAY")
+                    if replay_retry_ids:
+                        actions.append("RETRY_PLAYBACK")
                 if (
                     pending_asr
                     and pending_asr[-1] is not None
@@ -282,6 +328,8 @@ def session_state(
                     if pending_asr
                     else "RECEIVING_AUDIO"
                     if recording_in_progress
+                    else "REPLAYING_PROMPT"
+                    if active_replay is not None
                     else "WAITING_INPUT"
                     if guide_complete and initial_complete
                     else "DELIVERING_INITIAL",
@@ -290,6 +338,34 @@ def session_state(
                     if segments and segments[-1].segment_id in recognition
                     else None,
                     "checkpoint_b": bool(segments) and not pending_asr,
+                    "replay_count": len(effective_replay_ids(db, attempt.attempt_id)),
+                    "replay_target": {
+                        "source": replay_source,
+                        "audio_id": replay_audio.audio_id if replay_audio else None,
+                        "help_request_id": replay_help.help_request_id if replay_help else None,
+                        "available": replay_available,
+                    },
+                    "active_replay": {
+                        "playback_id": active_replay.playback_id,
+                        "kind": active_replay.kind,
+                        "status": active_replay.status,
+                        "retry_of_id": active_replay.retry_of_id,
+                    }
+                    if active_replay
+                    else None,
+                    "replay_playbacks": [
+                        {
+                            "playback_id": p.playback_id,
+                            "request_id": p.request_id,
+                            "kind": p.kind,
+                            "status": p.status,
+                            "retry_of_id": p.retry_of_id,
+                            "audio_id": p.audio_id,
+                            "guidance_audio_id": p.guidance_audio_id,
+                        }
+                        for p in replay_rows
+                    ],
+                    "replay_retry_ids": replay_retry_ids if "RETRY_PLAYBACK" in actions else [],
                     "effective_help_count": len(delivered),
                     "latest_delivered_help_request_id": delivered[-1].help_request_id
                     if delivered
