@@ -17,7 +17,7 @@ from app.database import create_database_engine
 from app.evaluation.qwen_qa_text import _failure, _invalid_number, _unique_object
 from app.evaluation.worker import KnownFailure
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
-from app.task_types.speaking_guidance import SpeakingHelpRequest
+from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest
 from app.taskbank.models import TaskRevision
 
 
@@ -187,6 +187,16 @@ def execute(engine, work, adapter):
         job.status, job.error_code = status, error
         if output is not None:
             job.guidance_text = output["guidance_text"]
+            s.add(
+                GuidanceAudio(
+                    help_request_id=job.help_request_id,
+                    attempt_id=job.attempt_id,
+                    text_sha256=hashlib.sha256(job.guidance_text.encode("utf-8")).hexdigest(),
+                    status="WAITING",
+                    attempts=0,
+                    history=[],
+                )
+            )
             job.provider, job.model = work.contract.get("provider"), work.contract.get("model")
             request_id = output.get("request_id")
             job.provider_request_id = (

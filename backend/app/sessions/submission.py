@@ -3,6 +3,7 @@
 Internal services require caller authorization and a caller-owned transaction.
 """
 
+import hashlib
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -35,15 +36,19 @@ class Playback(Base):
     __table_args__ = (
         UniqueConstraint("attempt_id", "request_id", name="uq_playback_request"),
         CheckConstraint(
-            "kind IN ('GUIDE','INITIAL_PROMPT','USER_REPLAY','TECHNICAL_RETRY')",
+            "kind IN ('GUIDE','INITIAL_PROMPT','USER_REPLAY','TECHNICAL_RETRY','GUIDANCE')",
             name="ck_playback_kind",
         ),
         CheckConstraint("status IN ('STARTED','COMPLETED','FAILED')", name="ck_playback_status"),
+        CheckConstraint(
+            "(audio_id IS NULL) <> (guidance_audio_id IS NULL)", name="ck_playback_resource"
+        ),
     )
     playback_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     attempt_id: Mapped[UUID] = mapped_column(ForeignKey("attempts.attempt_id"), nullable=False)
-    audio_id: Mapped[UUID] = mapped_column(
-        ForeignKey("fixed_audio_requests.audio_id"), nullable=False
+    audio_id: Mapped[UUID | None] = mapped_column(ForeignKey("fixed_audio_requests.audio_id"))
+    guidance_audio_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("speaking_guidance_audio.audio_id")
     )
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
@@ -180,6 +185,8 @@ def start_playback(
     request_id: str,
     kind: str,
     retry_of_id: UUID | None = None,
+    help_request_id: UUID | None = None,
+    store=None,
 ) -> Playback:
     _identity(request_id)
     task, attempt = _locked(session, session_id, session_task_id, attempt_id)
@@ -188,7 +195,18 @@ def start_playback(
         select(Playback).where(Playback.attempt_id == attempt_id, Playback.request_id == request_id)
     )
     if previous:
-        if (previous.kind, previous.retry_of_id) != (kind, retry_of_id):
+        from app.task_types.speaking_guidance import GuidanceAudio
+
+        previous_audio = (
+            session.get(GuidanceAudio, previous.guidance_audio_id)
+            if previous.guidance_audio_id
+            else None
+        )
+        if (
+            previous.kind,
+            previous.retry_of_id,
+            previous_audio.help_request_id if previous_audio else None,
+        ) != (kind, retry_of_id, help_request_id):
             raise ValueError("Playback request conflicts")
         return previous
     revision = _revision(session, task)
@@ -204,6 +222,72 @@ def start_playback(
         raise ValueError("Playback in progress")
     guide_done = not revision.guide_text or _completed(session, attempt_id, "GUIDE")
     initial_done = _completed(session, attempt_id, "INITIAL_PROMPT")
+    if kind == "GUIDANCE" or (kind == "TECHNICAL_RETRY" and help_request_id is not None):
+        from app.media.fixed_audio import AudioStore
+        from app.task_types.speaking_guidance import GuidanceAudio, active_help
+
+        help_row = active_help(session, attempt_id)
+        audio = session.scalar(
+            select(GuidanceAudio).where(GuidanceAudio.help_request_id == help_request_id)
+        )
+        if (
+            revision.task_type != "speaking"
+            or help_row is None
+            or help_row.help_request_id != help_request_id
+            or help_row.status != "READY"
+            or audio is None
+            or audio.status != "READY"
+            or audio.attempt_id != attempt_id
+            or not help_row.guidance_text
+            or hashlib.sha256(help_row.guidance_text.encode("utf-8")).hexdigest()
+            != audio.text_sha256
+        ):
+            raise ValueError("Guidance audio is not available")
+        if kind == "GUIDANCE":
+            if (
+                retry_of_id is not None
+                or session.scalar(
+                    select(Playback.playback_id)
+                    .where(Playback.guidance_audio_id == audio.audio_id)
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise ValueError("Guidance delivery already started")
+        else:
+            original = session.get(Playback, retry_of_id) if retry_of_id else None
+            if (
+                original is None
+                or original.attempt_id != attempt_id
+                or original.kind != "GUIDANCE"
+                or original.status != "FAILED"
+                or original.guidance_audio_id != audio.audio_id
+                or session.scalar(
+                    select(Playback.playback_id).where(
+                        Playback.retry_of_id == original.playback_id, Playback.status == "COMPLETED"
+                    )
+                )
+                is not None
+            ):
+                raise ValueError("Invalid guidance technical retry")
+        try:
+            (store or AudioStore()).read(audio.storage_ref, audio.content_sha256)
+        except (ValueError, OSError):
+            raise ValueError("Guidance audio unavailable") from None
+        row = Playback(
+            playback_id=uuid4(),
+            attempt_id=attempt_id,
+            request_id=request_id,
+            kind=kind,
+            status="STARTED",
+            guidance_audio_id=audio.audio_id,
+            retry_of_id=retry_of_id,
+        )
+        session.add(row)
+        session.flush()
+        return row
+    if help_request_id is not None:
+        raise ValueError("Unexpected help request identity")
     if kind == "TECHNICAL_RETRY":
         original = session.get(Playback, retry_of_id) if retry_of_id else None
         if (
@@ -272,6 +356,7 @@ def finish_playback(
     attempt_id: UUID,
     playback_id: UUID,
     completed: bool,
+    store=None,
 ) -> Playback:
     task, attempt = _locked(session, session_id, session_task_id, attempt_id)
     _open(task, attempt)
@@ -287,6 +372,52 @@ def finish_playback(
     if row.status != "STARTED":
         if row.status != result:
             raise ValueError(f"Playback result conflicts: current status {row.status}")
+        return row
+    if completed and row.guidance_audio_id is not None:
+        from app.media.fixed_audio import AudioStore
+        from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest
+
+        audio = session.get(GuidanceAudio, row.guidance_audio_id)
+        help_row = (
+            session.scalar(
+                select(SpeakingHelpRequest)
+                .where(SpeakingHelpRequest.help_request_id == audio.help_request_id)
+                .with_for_update()
+            )
+            if audio
+            else None
+        )
+        if (
+            audio is None
+            or audio.status != "READY"
+            or audio.attempt_id != attempt_id
+            or help_row is None
+            or help_row.attempt_id != attempt_id
+            or help_row.status != "READY"
+            or row.kind not in ("GUIDANCE", "TECHNICAL_RETRY")
+            or not help_row.guidance_text
+            or hashlib.sha256(help_row.guidance_text.encode("utf-8")).hexdigest()
+            != audio.text_sha256
+        ):
+            raise ValueError("Guidance delivery identity mismatch")
+        if row.kind == "TECHNICAL_RETRY":
+            original = session.get(Playback, row.retry_of_id)
+            if (
+                original is None
+                or original.kind != "GUIDANCE"
+                or original.status != "FAILED"
+                or original.guidance_audio_id != audio.audio_id
+                or original.attempt_id != attempt_id
+            ):
+                raise ValueError("Guidance retry identity mismatch")
+        try:
+            (store or AudioStore()).read(audio.storage_ref, audio.content_sha256)
+        except (ValueError, OSError):
+            raise ValueError("Guidance audio unavailable") from None
+        row.status = result
+        session.flush()
+        help_row.status = "DELIVERED"
+        session.flush()
         return row
     row.status = result
     session.flush()
