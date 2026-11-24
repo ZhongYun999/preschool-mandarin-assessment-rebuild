@@ -18,8 +18,9 @@ from app.api.assessment_auth import (
     require_session_access,
 )
 from app.api.assessment_operations import conflict, task_row
-from app.api.teacher_api import get_db
+from app.api.teacher_api import get_audio_store, get_db
 from app.media.audio_inspection import AudioError, AudioTools, inspect_audio
+from app.media.fixed_audio import AudioStore
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, Attempt
@@ -45,6 +46,7 @@ def get_recording_store():
 
 
 recording_store = Depends(get_recording_store)
+audio_store = Depends(get_audio_store)
 
 
 class RecordingStart(BaseModel):
@@ -162,6 +164,7 @@ def void_help(
     body: HelpVoid,
     _auth: UUID = write_auth,
     db: Session = write_db,
+    store: AudioStore = audio_store,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
@@ -197,15 +200,8 @@ def void_help(
                     if audio
                     else None
                 )
-                if audio is None or (
-                    audio.status not in ("FAILED", "UNKNOWN")
-                    and not (
-                        audio.status == "READY"
-                        and playback is not None
-                        and playback.status == "FAILED"
-                    )
-                ):
-                    raise ValueError("Guidance delivery cannot be voided")
+                if audio is None or audio.attempt_id != body.attempt_id:
+                    raise ValueError("Guidance audio not available")
                 if (
                     db.scalar(
                         select(Playback.playback_id).where(
@@ -217,10 +213,28 @@ def void_help(
                     raise ValueError("Playback in progress")
                 if audio.status == "UNKNOWN" and not body.accept_unknown:
                     raise ValueError("Unknown external outcome requires explicit acknowledgment")
-                row.error_code = "DELIVERY_FAILED"
+                resource_unavailable = False
+                if audio.status in ("READY", "SAVED"):
+                    try:
+                        store.read(audio.storage_ref, audio.content_sha256)
+                    except (ValueError, OSError):
+                        resource_unavailable = True
+                if (
+                    audio.status not in ("FAILED", "UNKNOWN")
+                    and not resource_unavailable
+                    and not (
+                        audio.status == "READY"
+                        and playback is not None
+                        and playback.status == "FAILED"
+                    )
+                ):
+                    raise ValueError("Guidance delivery cannot be voided")
+                row.error_code = (
+                    "GUIDANCE_AUDIO_UNAVAILABLE" if resource_unavailable else "DELIVERY_FAILED"
+                )
                 row.execution_history = [
                     *row.execution_history,
-                    {"status": "DELIVERY_FAILED", "audio_id": str(audio.audio_id)},
+                    {"status": row.error_code, "audio_id": str(audio.audio_id)},
                 ]
             elif row.status not in ("FAILED", "UNKNOWN"):
                 raise ValueError("Help request cannot be voided")
