@@ -29,6 +29,7 @@ from app.task_types.repetition import submit_repetition
 from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
 from app.task_types.speaking import SpeakingSegment
 from app.task_types.speaking_asr import SpeakingASR
+from app.task_types.speaking_guidance import SpeakingHelpRequest, request_help
 
 router = APIRouter(prefix="/assessment/sessions/{session_id}/tasks/{task_id}")
 read_auth = Depends(require_read_session_access)
@@ -69,6 +70,124 @@ class ASRRetry(BaseModel):
     request_id: str = Field(min_length=1, pattern=r"\S")
     expected_attempts: int = Field(ge=0)
     accept_unknown: StrictBool = False
+
+
+class HelpInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    request_id: str = Field(min_length=1, pattern=r"\S")
+
+
+class HelpRetry(HelpInput):
+    expected_attempts: int = Field(ge=0)
+    accept_unknown: StrictBool = False
+
+
+class HelpVoid(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    accept_unknown: StrictBool = False
+
+
+@router.post("/help-requests")
+def create_help(
+    session_id: UUID,
+    task_id: UUID,
+    body: HelpInput,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            row = request_help(
+                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
+            )
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/retry")
+def retry_help(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("Help request not found")
+            if row.retry_request_id == body.request_id:
+                if row.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"help_request_id": row.help_request_id, "status": row.status}
+            if row.attempts != body.expected_attempts or row.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Help request cannot be retried")
+            if row.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            row.status, row.error_code = "WAITING", None
+            row.retry_request_id, row.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/void")
+def void_help(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpVoid,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("Help request not found")
+            if row.status == "VOIDED":
+                return {"help_request_id": row.help_request_id, "status": row.status}
+            if row.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Help request cannot be voided")
+            if row.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            row.status = "VOIDED"
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
 
 
 @router.post("/segments/{segment_id}/asr/retry")

@@ -40,6 +40,8 @@ def current(db, session_id, task_id, attempt_id):
 
 
 def start(db: Session, *, session_id, session_task_id, attempt_id, request_id):
+    from app.task_types.speaking_guidance import active_help
+
     _identity(request_id)
     revision = current(db, session_id, session_task_id, attempt_id)
     previous = db.scalar(
@@ -54,6 +56,7 @@ def start(db: Session, *, session_id, session_task_id, attempt_id, request_id):
         or not _completed(db, attempt_id, "INITIAL_PROMPT")
         or _busy(db, attempt_id)
         or recording_busy(db, attempt_id)
+        or active_help(db, attempt_id) is not None
         or db.scalar(
             select(SpeakingSegment.segment_id)
             .outerjoin(SpeakingASR, SpeakingASR.segment_id == SpeakingSegment.segment_id)
