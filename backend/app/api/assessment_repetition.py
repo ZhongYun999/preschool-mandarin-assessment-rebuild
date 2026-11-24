@@ -67,6 +67,12 @@ class RecordingSubmit(BaseModel):
     submit_request_id: str = Field(min_length=1, pattern=r"\S")
 
 
+class SpeakingFinish(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    finish_request_id: str = Field(min_length=1, pattern=r"\S")
+
+
 class ASRRetry(BaseModel):
     model_config = ConfigDict(extra="forbid")
     attempt_id: UUID
@@ -642,3 +648,15 @@ def submit_qa_answer(
     store: RecordingStore = recording_store,
 ):
     return _submit_recording(db, session_id, task_id, body, _auth, store, submit_qa)
+
+
+@router.post("/submissions/speaking")
+def submit_speaking_answer(
+    session_id: UUID,
+    task_id: UUID,
+    body: SpeakingFinish,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+    store: RecordingStore = recording_store,
+):
+    return _submit_recording(db, session_id, task_id, body, _auth, store, speaking.submit_speaking)
