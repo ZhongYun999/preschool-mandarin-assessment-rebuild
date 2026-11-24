@@ -16,6 +16,7 @@ from app.sessions.assessment_session import AssessmentSession, Attempt, SessionT
 from app.sessions.submission import Playback, Submission, _busy, _completed
 from app.task_types.speaking import SpeakingSegment
 from app.task_types.speaking_asr import SpeakingASR
+from app.task_types.speaking_guidance import active_help
 from app.taskbank.models import TaskRevision
 
 router = APIRouter(prefix="/assessment")
@@ -158,6 +159,9 @@ def session_state(
             if recognition.get(segment.segment_id) is None
             or recognition[segment.segment_id].status != "READY"
         ]
+        help_request = (
+            active_help(db, attempt.attempt_id) if attempt and task_type == "speaking" else None
+        )
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
@@ -179,7 +183,11 @@ def session_state(
                 actions = [
                     a for a in actions if a not in ("START_USER_REPLAY", "SUBMIT_INSTRUCTION")
                 ]
-                if recording_in_progress:
+                if help_request is not None:
+                    actions = ["REDO_ATTEMPT"]
+                    if help_request.status in ("FAILED", "UNKNOWN"):
+                        actions.extend(["RETRY_HELP", "VOID_HELP"])
+                elif recording_in_progress:
                     actions = ["UPLOAD_RECORDING", "CANCEL_RECORDING", "REDO_ATTEMPT"]
                 elif (
                     guide_complete
@@ -188,6 +196,7 @@ def session_state(
                     and not pending_asr
                 ):
                     actions.append("START_RECORDING")
+                    actions.append("REQUEST_HELP")
                 if (
                     pending_asr
                     and pending_asr[-1] is not None
@@ -212,7 +221,13 @@ def session_state(
                 saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,
                 speaking={
-                    "phase": "RECOVERABLE_ERROR"
+                    "phase": "DELIVERING_GUIDANCE"
+                    if help_request is not None and help_request.status == "READY"
+                    else "RECOVERABLE_ERROR"
+                    if help_request is not None and help_request.status in ("FAILED", "UNKNOWN")
+                    else "GENERATING_GUIDANCE"
+                    if help_request is not None
+                    else "RECOVERABLE_ERROR"
                     if pending_asr
                     and pending_asr[-1] is not None
                     and pending_asr[-1].status in ("FAILED", "UNKNOWN")
@@ -228,6 +243,17 @@ def session_state(
                     if segments and segments[-1].segment_id in recognition
                     else None,
                     "checkpoint_b": bool(segments) and not pending_asr,
+                    "help_request": {
+                        "help_request_id": help_request.help_request_id,
+                        "status": help_request.status,
+                        "input_frontier": help_request.input_frontier,
+                        "checkpoint_c": help_request.status == "READY",
+                        "guidance_text": help_request.guidance_text,
+                        "error_code": help_request.error_code,
+                        "attempts": help_request.attempts,
+                    }
+                    if help_request is not None
+                    else None,
                     "pending_recording_ids": [
                         r.recording_id for r in recordings if r.status == "STARTED"
                     ],
