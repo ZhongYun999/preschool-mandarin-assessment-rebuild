@@ -16,7 +16,7 @@ from app.sessions.assessment_session import AssessmentSession, Attempt, SessionT
 from app.sessions.submission import Playback, Submission, _busy, _completed
 from app.task_types.speaking import SpeakingSegment
 from app.task_types.speaking_asr import SpeakingASR
-from app.task_types.speaking_guidance import active_help
+from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest, active_help
 from app.taskbank.models import TaskRevision
 
 router = APIRouter(prefix="/assessment")
@@ -162,6 +162,44 @@ def session_state(
         help_request = (
             active_help(db, attempt.attempt_id) if attempt and task_type == "speaking" else None
         )
+        audio = (
+            db.scalar(
+                select(GuidanceAudio).where(
+                    GuidanceAudio.help_request_id == help_request.help_request_id
+                )
+            )
+            if help_request
+            else None
+        )
+        guidance_playbacks = (
+            list(db.scalars(select(Playback).where(Playback.guidance_audio_id == audio.audio_id)))
+            if audio
+            else []
+        )
+        delivered = (
+            list(
+                db.scalars(
+                    select(SpeakingHelpRequest)
+                    .where(
+                        SpeakingHelpRequest.attempt_id == attempt.attempt_id,
+                        SpeakingHelpRequest.status == "DELIVERED",
+                        SpeakingHelpRequest.source == "child_requested",
+                    )
+                    .order_by(SpeakingHelpRequest.position)
+                )
+            )
+            if attempt and task_type == "speaking"
+            else []
+        )
+        last_delivered_audio = (
+            db.scalar(
+                select(GuidanceAudio).where(
+                    GuidanceAudio.help_request_id == delivered[-1].help_request_id
+                )
+            )
+            if delivered
+            else None
+        )
         actions = []
         if owner.status == "IN_PROGRESS":
             if attempt is None:
@@ -187,6 +225,15 @@ def session_state(
                     actions = ["REDO_ATTEMPT"]
                     if help_request.status in ("FAILED", "UNKNOWN"):
                         actions.extend(["RETRY_HELP", "VOID_HELP"])
+                    if audio and audio.status in ("FAILED", "UNKNOWN"):
+                        actions.extend(["RETRY_GUIDANCE_TTS", "VOID_HELP"])
+                    if audio and audio.status == "READY":
+                        if any(p.status == "STARTED" for p in guidance_playbacks):
+                            actions.append("FINISH_PLAYBACK")
+                        elif guidance_playbacks:
+                            actions.extend(["RETRY_GUIDANCE_PLAYBACK", "VOID_HELP"])
+                        else:
+                            actions.append("START_GUIDANCE_PLAYBACK")
                 elif recording_in_progress:
                     actions = ["UPLOAD_RECORDING", "CANCEL_RECORDING", "REDO_ATTEMPT"]
                 elif (
@@ -243,6 +290,39 @@ def session_state(
                     if segments and segments[-1].segment_id in recognition
                     else None,
                     "checkpoint_b": bool(segments) and not pending_asr,
+                    "effective_help_count": len(delivered),
+                    "latest_delivered_help_request_id": delivered[-1].help_request_id
+                    if delivered
+                    else None,
+                    "latest_delivered_guidance": {
+                        "help_request_id": delivered[-1].help_request_id,
+                        "checkpoint_c": True,
+                        "checkpoint_d": True,
+                        "audio_id": last_delivered_audio.audio_id if last_delivered_audio else None,
+                    }
+                    if delivered
+                    else None,
+                    "checkpoint_d": bool(delivered) and help_request is None,
+                    "guidance_audio": {
+                        "audio_id": audio.audio_id,
+                        "status": audio.status,
+                        "error_code": audio.error_code,
+                        "attempts": audio.attempts,
+                        "audio_url": f"/assessment/sessions/{session_id}/tasks/{task.session_task_id}/guidance-audio/{audio.audio_id}"
+                        if audio.status == "READY"
+                        else None,
+                        "playbacks": [
+                            {
+                                "playback_id": p.playback_id,
+                                "kind": p.kind,
+                                "status": p.status,
+                                "retry_of_id": p.retry_of_id,
+                            }
+                            for p in guidance_playbacks
+                        ],
+                    }
+                    if audio
+                    else None,
                     "help_request": {
                         "help_request_id": help_request.help_request_id,
                         "status": help_request.status,

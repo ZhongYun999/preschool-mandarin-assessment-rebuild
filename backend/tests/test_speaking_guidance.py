@@ -13,13 +13,16 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from test_speaking_process_asr import REQUIREMENT, FakeASR, ready, segment
 
+from app.api.teacher_api import get_audio_store
 from app.evaluation.worker import KnownFailure
-from app.sessions.submission import Playback
-from app.task_types.speaking import current as lock_speaking
+from app.main import app
+from app.media.fixed_audio import AudioData
+from app.sessions.submission import Playback, finish_playback, start_playback
 from app.task_types.speaking_asr_worker import claim as claim_asr
 from app.task_types.speaking_asr_worker import execute as execute_asr
-from app.task_types.speaking_guidance import SpeakingHelpRequest
+from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest
 from app.task_types.speaking_guidance_worker import QwenGuidance, claim, execute, recover_expired
+from app.task_types.speaking_tts_worker import run_audio
 
 pytest_plugins = ("test_speaking_process_asr",)
 CONTRACT = {"provider": "test", "model": "mock", "region": "cn-beijing", "workspace": "test"}
@@ -45,19 +48,64 @@ def help_request(client, base, h, aid, request_id="help"):
     )
 
 
+def make_audio(db, help_id):
+    import io
+    import wave
+
+    class Synth:
+        def synthesize(self, source, config):
+            out = io.BytesIO()
+            with wave.open(out, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\0\0" * 160)
+            return AudioData(out.getvalue(), "audio/wav")
+
+    with Session(db) as s:
+        audio = s.scalar(select(GuidanceAudio).where(GuidanceAudio.help_request_id == help_id))
+        audio_id = audio.audio_id
+    store = app.dependency_overrides[get_audio_store]()
+    config = {
+        "provider": "test",
+        "model": "test",
+        "voice": "test",
+        "version": "1",
+        "speed": 1,
+        "sample_rate": 16000,
+        "format": "wav",
+    }
+    assert run_audio(db, audio_id, store, Synth(), config) == "ready"
+    return store
+
+
 def simulate_delivery(db, root, base, aid, help_id, *, void=False):
-    """Test-only representation of a later verified D or final delivery failure."""
+    """Deliver using the real playback transaction, with an offline synthesizer."""
     sid, task_id = UUID(root.rsplit("/", 1)[1]), UUID(base.rsplit("/", 1)[1])
+    store = make_audio(db, help_id)
     with Session(db) as s, s.begin():
-        lock_speaking(s, sid, task_id, UUID(aid))
-        row = s.scalar(
-            select(SpeakingHelpRequest)
-            .where(SpeakingHelpRequest.help_request_id == help_id)
-            .with_for_update()
+        playback = start_playback(
+            s,
+            session_id=sid,
+            session_task_id=task_id,
+            attempt_id=UUID(aid),
+            request_id=f"guidance-{help_id}",
+            kind="GUIDANCE",
+            help_request_id=help_id,
+            store=store,
         )
-        assert row.status == "READY"
-        row.status = "VOIDED" if void else "DELIVERED"
+        finish_playback(
+            s,
+            session_id=sid,
+            session_task_id=task_id,
+            attempt_id=UUID(aid),
+            playback_id=playback.playback_id,
+            completed=not void,
+            store=store,
+        )
         if void:
+            row = s.get(SpeakingHelpRequest, help_id)
+            row.status = "VOIDED"
             row.error_code = "DELIVERY_FAILED"
             row.execution_history = [*row.execution_history, {"status": "DELIVERY_FAILED"}]
 
@@ -230,18 +278,32 @@ def test_delivery_and_next_help_serialize(db, client, flow):
     root, base, h, aid = ready(client, flow)
     first = UUID(help_request(client, base, h, aid, "first").json()["help_request_id"])
     assert execute(db, claim(db, first, prompt="prompt", contract=CONTRACT), FakeGuidance())
+    store = make_audio(db, first)
+    with Session(db) as s, s.begin():
+        playback = start_playback(
+            s,
+            session_id=UUID(root.rsplit("/", 1)[1]),
+            session_task_id=UUID(base.rsplit("/", 1)[1]),
+            attempt_id=UUID(aid),
+            request_id="guidance",
+            kind="GUIDANCE",
+            help_request_id=first,
+            store=store,
+        )
+        playback_id = playback.playback_id
     held, release, entering = Event(), Event(), Event()
 
     def deliver():
         with Session(db) as s, s.begin():
-            lock_speaking(s, UUID(root.rsplit("/", 1)[1]), UUID(base.rsplit("/", 1)[1]), UUID(aid))
-            row = s.scalar(
-                select(SpeakingHelpRequest)
-                .where(SpeakingHelpRequest.help_request_id == first)
-                .with_for_update()
+            finish_playback(
+                s,
+                session_id=UUID(root.rsplit("/", 1)[1]),
+                session_task_id=UUID(base.rsplit("/", 1)[1]),
+                attempt_id=UUID(aid),
+                playback_id=playback_id,
+                completed=True,
+                store=store,
             )
-            row.status = "DELIVERED"
-            s.flush()
             held.set()
             assert release.wait(10)
 

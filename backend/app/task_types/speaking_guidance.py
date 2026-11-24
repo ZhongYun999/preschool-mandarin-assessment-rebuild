@@ -76,6 +76,40 @@ class SpeakingHelpRequest(Base):
     retry_expected_attempts: Mapped[int | None] = mapped_column(Integer)
 
 
+class GuidanceAudio(Base):
+    __tablename__ = "speaking_guidance_audio"
+    __table_args__ = (
+        UniqueConstraint("help_request_id", name="uq_guidance_audio_help"),
+        CheckConstraint(
+            "status IN ('WAITING','SENDING','SAVED','READY','FAILED','UNKNOWN')",
+            name="ck_guidance_audio_status",
+        ),
+        CheckConstraint("text_sha256 ~ '^[0-9a-f]{64}$'", name="ck_guidance_audio_text_sha"),
+        CheckConstraint("jsonb_typeof(history) = 'array'", name="ck_guidance_audio_history"),
+        CheckConstraint(
+            "(status IN ('SAVED','READY') AND storage_ref IS NOT NULL AND content_sha256 IS NOT NULL AND media_type IS NOT NULL AND content_sha256 ~ '^[0-9a-f]{64}$' AND media_type = 'audio/wav') OR (status NOT IN ('SAVED','READY') AND storage_ref IS NULL AND content_sha256 IS NULL AND media_type IS NULL)",
+            name="ck_guidance_audio_result",
+        ),
+    )
+    audio_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    help_request_id: Mapped[UUID] = mapped_column(
+        ForeignKey("speaking_help_requests.help_request_id"), nullable=False
+    )
+    attempt_id: Mapped[UUID] = mapped_column(ForeignKey("attempts.attempt_id"), nullable=False)
+    text_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    config: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="WAITING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_id: Mapped[UUID | None]
+    storage_ref: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(Text)
+    media_type: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    retry_request_id: Mapped[str | None] = mapped_column(Text)
+    retry_expected_attempts: Mapped[int | None] = mapped_column(Integer)
+
+
 def active_help(db, attempt_id):
     return db.scalar(
         select(SpeakingHelpRequest)

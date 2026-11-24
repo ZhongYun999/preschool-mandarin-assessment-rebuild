@@ -39,8 +39,9 @@ class Input(BaseModel):
 class PlaybackInput(Input):
     attempt_id: UUID
     request_id: str = Field(min_length=1, pattern=r"\S")
-    kind: Literal["GUIDE", "INITIAL_PROMPT", "USER_REPLAY", "TECHNICAL_RETRY"]
+    kind: Literal["GUIDE", "INITIAL_PROMPT", "USER_REPLAY", "TECHNICAL_RETRY", "GUIDANCE"]
     retry_of_id: UUID | None = None
+    help_request_id: UUID | None = None
 
 
 class FinishInput(Input):
@@ -80,6 +81,11 @@ def attempt_view(attempt):
 
 
 def playback_view(row, session_id, task_id):
+    resource = (
+        f"guidance-audio/{row.guidance_audio_id}"
+        if row.guidance_audio_id
+        else f"audio/{row.audio_id}"
+    )
     return {
         "playback_id": row.playback_id,
         "attempt_id": row.attempt_id,
@@ -88,7 +94,8 @@ def playback_view(row, session_id, task_id):
         "status": row.status,
         "retry_of_id": row.retry_of_id,
         "audio_id": row.audio_id,
-        "audio_url": f"/assessment/sessions/{session_id}/tasks/{task_id}/audio/{row.audio_id}",
+        "guidance_audio_id": row.guidance_audio_id,
+        "audio_url": f"/assessment/sessions/{session_id}/tasks/{task_id}/{resource}",
     }
 
 
@@ -173,6 +180,41 @@ def audio(
     return Response(data, media_type=row.media_type, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/tasks/{task_id}/guidance-audio/{audio_id}")
+def guidance_audio(
+    session_id: UUID,
+    task_id: UUID,
+    audio_id: UUID,
+    _auth: UUID = read_auth,
+    db: Session = read_db,
+    store: AudioStore = audio_store,
+):
+    from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest
+
+    task, _, revision = task_row(db, session_id, task_id)
+    row = db.scalar(
+        select(GuidanceAudio)
+        .join(
+            SpeakingHelpRequest,
+            SpeakingHelpRequest.help_request_id == GuidanceAudio.help_request_id,
+        )
+        .join(Attempt, Attempt.attempt_id == GuidanceAudio.attempt_id)
+        .where(
+            GuidanceAudio.audio_id == audio_id,
+            Attempt.session_task_id == task.session_task_id,
+            SpeakingHelpRequest.attempt_id == Attempt.attempt_id,
+            GuidanceAudio.status == "READY",
+        )
+    )
+    if revision.task_type != "speaking" or row is None:
+        raise HTTPException(404, "Audio not found")
+    try:
+        data = store.read(row.storage_ref, row.content_sha256)
+    except (ValueError, OSError):
+        raise HTTPException(503, "Audio unavailable") from None
+    return Response(data, media_type=row.media_type, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/tasks/{task_id}/images/{slot}")
 def image(
     session_id: UUID,
@@ -234,6 +276,7 @@ def playback_start(
     body: PlaybackInput,
     _auth: UUID = write_auth,
     db: Session = write_db,
+    store: AudioStore = audio_store,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
@@ -241,7 +284,7 @@ def playback_start(
         task_row(db, session_id, task_id)
         try:
             row = start_playback(
-                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
+                db, session_id=session_id, session_task_id=task_id, store=store, **body.model_dump()
             )
             return playback_view(row, session_id, task_id)
         except ValueError as exc:
@@ -256,6 +299,7 @@ def playback_finish(
     body: FinishInput,
     _auth: UUID = write_auth,
     db: Session = write_db,
+    store: AudioStore = audio_store,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
@@ -267,6 +311,7 @@ def playback_finish(
                 session_id=session_id,
                 session_task_id=task_id,
                 playback_id=playback_id,
+                store=store,
                 **body.model_dump(),
             )
             return playback_view(row, session_id, task_id)

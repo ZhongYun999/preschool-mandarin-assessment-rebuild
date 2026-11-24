@@ -18,18 +18,20 @@ from app.api.assessment_auth import (
     require_session_access,
 )
 from app.api.assessment_operations import conflict, task_row
-from app.api.teacher_api import get_db
+from app.api.teacher_api import get_audio_store, get_db
 from app.media.audio_inspection import AudioError, AudioTools, inspect_audio
+from app.media.fixed_audio import AudioStore
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, Attempt
+from app.sessions.submission import Playback
 from app.task_types import speaking
 from app.task_types.qa import submit_qa
 from app.task_types.repetition import submit_repetition
 from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
 from app.task_types.speaking import SpeakingSegment
 from app.task_types.speaking_asr import SpeakingASR
-from app.task_types.speaking_guidance import SpeakingHelpRequest, request_help
+from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest, request_help
 
 router = APIRouter(prefix="/assessment/sessions/{session_id}/tasks/{task_id}")
 read_auth = Depends(require_read_session_access)
@@ -44,6 +46,7 @@ def get_recording_store():
 
 
 recording_store = Depends(get_recording_store)
+audio_store = Depends(get_audio_store)
 
 
 class RecordingStart(BaseModel):
@@ -161,6 +164,7 @@ def void_help(
     body: HelpVoid,
     _auth: UUID = write_auth,
     db: Session = write_db,
+    store: AudioStore = audio_store,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
@@ -180,12 +184,114 @@ def void_help(
                 raise ValueError("Help request not found")
             if row.status == "VOIDED":
                 return {"help_request_id": row.help_request_id, "status": row.status}
-            if row.status not in ("FAILED", "UNKNOWN"):
+            if row.status == "READY":
+                audio = db.scalar(
+                    select(GuidanceAudio)
+                    .where(GuidanceAudio.help_request_id == help_id)
+                    .with_for_update()
+                )
+                playback = (
+                    db.scalar(
+                        select(Playback)
+                        .where(Playback.guidance_audio_id == audio.audio_id)
+                        .order_by(Playback.playback_id)
+                        .limit(1)
+                    )
+                    if audio
+                    else None
+                )
+                if audio is None or audio.attempt_id != body.attempt_id:
+                    raise ValueError("Guidance audio not available")
+                if (
+                    db.scalar(
+                        select(Playback.playback_id).where(
+                            Playback.attempt_id == body.attempt_id, Playback.status == "STARTED"
+                        )
+                    )
+                    is not None
+                ):
+                    raise ValueError("Playback in progress")
+                if audio.status == "UNKNOWN" and not body.accept_unknown:
+                    raise ValueError("Unknown external outcome requires explicit acknowledgment")
+                resource_unavailable = False
+                if audio.status in ("READY", "SAVED"):
+                    try:
+                        store.read(audio.storage_ref, audio.content_sha256)
+                    except (ValueError, OSError):
+                        resource_unavailable = True
+                if (
+                    audio.status not in ("FAILED", "UNKNOWN")
+                    and not resource_unavailable
+                    and not (
+                        audio.status == "READY"
+                        and playback is not None
+                        and playback.status == "FAILED"
+                    )
+                ):
+                    raise ValueError("Guidance delivery cannot be voided")
+                row.error_code = (
+                    "GUIDANCE_AUDIO_UNAVAILABLE" if resource_unavailable else "DELIVERY_FAILED"
+                )
+                row.execution_history = [
+                    *row.execution_history,
+                    {"status": row.error_code, "audio_id": str(audio.audio_id)},
+                ]
+            elif row.status not in ("FAILED", "UNKNOWN"):
                 raise ValueError("Help request cannot be voided")
             if row.status == "UNKNOWN" and not body.accept_unknown:
                 raise ValueError("Unknown external outcome requires explicit acknowledgment")
             row.status = "VOIDED"
             return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/audio/retry")
+def retry_guidance_audio(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            help_row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            audio = db.scalar(
+                select(GuidanceAudio)
+                .where(GuidanceAudio.help_request_id == help_id)
+                .with_for_update()
+            )
+            if help_row is None or help_row.status != "READY" or audio is None:
+                raise ValueError("Guidance audio not available")
+            if audio.retry_request_id == body.request_id:
+                if audio.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"audio_id": audio.audio_id, "status": audio.status}
+            if (
+                audio.status not in ("FAILED", "UNKNOWN")
+                or audio.attempts != body.expected_attempts
+            ):
+                raise ValueError("Guidance audio cannot be retried")
+            if audio.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            audio.status, audio.error_code = "WAITING", None
+            audio.retry_request_id, audio.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"audio_id": audio.audio_id, "status": audio.status}
         except ValueError as exc:
             conflict(exc)
 
