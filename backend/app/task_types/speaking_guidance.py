@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    func,
     select,
     text,
 )
@@ -29,28 +30,33 @@ class SpeakingHelpRequest(Base):
     __tablename__ = "speaking_help_requests"
     __table_args__ = (
         UniqueConstraint("attempt_id", "request_id", name="uq_speaking_help_request"),
+        UniqueConstraint("attempt_id", "position", name="uq_speaking_help_position"),
         Index(
             "uq_speaking_help_active",
             "attempt_id",
             unique=True,
-            postgresql_where=text("status <> 'VOIDED'"),
+            postgresql_where=text("status NOT IN ('DELIVERED','VOIDED')"),
         ),
         CheckConstraint("source = 'child_requested'", name="ck_speaking_help_source"),
         CheckConstraint(
             "jsonb_typeof(execution_history) = 'array'", name="ck_speaking_help_history"
         ),
         CheckConstraint(
-            "status IN ('WAITING','RUNNING','FAILED','UNKNOWN','READY','VOIDED')",
+            "status IN ('WAITING','RUNNING','FAILED','UNKNOWN','READY','DELIVERED','VOIDED')",
             name="ck_speaking_help_status",
         ),
         CheckConstraint(
-            "(status = 'READY' AND guidance_text IS NOT NULL AND length(trim(guidance_text)) > 0) OR (status <> 'READY' AND guidance_text IS NULL)",
+            "(status IN ('READY','DELIVERED') AND guidance_text IS NOT NULL AND length(trim(guidance_text)) > 0) OR "
+            "(status = 'VOIDED' AND (guidance_text IS NULL OR length(trim(guidance_text)) > 0)) OR "
+            "(status NOT IN ('READY','DELIVERED','VOIDED') AND guidance_text IS NULL)",
             name="ck_speaking_help_text",
         ),
+        CheckConstraint("position > 0", name="ck_speaking_help_position"),
     )
     help_request_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     attempt_id: Mapped[UUID] = mapped_column(ForeignKey("attempts.attempt_id"), nullable=False)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False, default="child_requested")
     input_frontier: Mapped[dict] = mapped_column(JSONB, nullable=False)
     execution_history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
@@ -75,7 +81,7 @@ def active_help(db, attempt_id):
         select(SpeakingHelpRequest)
         .where(
             SpeakingHelpRequest.attempt_id == attempt_id,
-            SpeakingHelpRequest.status != "VOIDED",
+            SpeakingHelpRequest.status.not_in(("DELIVERED", "VOIDED")),
         )
         .order_by(SpeakingHelpRequest.help_request_id)
         .limit(1)
@@ -121,14 +127,36 @@ def request_help(db, *, session_id, session_task_id, attempt_id, request_id):
                 "text": asr.transcript,
             }
         )
+    history = list(
+        db.scalars(
+            select(SpeakingHelpRequest)
+            .where(
+                SpeakingHelpRequest.attempt_id == attempt_id,
+                SpeakingHelpRequest.status == "DELIVERED",
+            )
+            .order_by(SpeakingHelpRequest.position)
+        )
+    )
+    last_position = (
+        db.scalar(
+            select(func.max(SpeakingHelpRequest.position)).where(
+                SpeakingHelpRequest.attempt_id == attempt_id
+            )
+        )
+        or 0
+    )
     row = SpeakingHelpRequest(
         help_request_id=uuid4(),
         attempt_id=attempt_id,
         request_id=request_id,
+        position=last_position + 1,
         input_frontier={
             "task_revision_id": str(revision.task_revision_id),
             "segments": frontier,
-            "delivered_guidance": [],
+            "delivered_guidance": [
+                {"help_request_id": str(item.help_request_id), "text": item.guidance_text}
+                for item in history
+            ],
         },
         status="WAITING",
         source="child_requested",

@@ -9,11 +9,13 @@ import dashscope
 import httpx
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from test_speaking_process_asr import REQUIREMENT, FakeASR, ready, segment
 
 from app.evaluation.worker import KnownFailure
 from app.sessions.submission import Playback
+from app.task_types.speaking import current as lock_speaking
 from app.task_types.speaking_asr_worker import claim as claim_asr
 from app.task_types.speaking_asr_worker import execute as execute_asr
 from app.task_types.speaking_guidance import SpeakingHelpRequest
@@ -40,6 +42,104 @@ class FakeGuidance:
 def help_request(client, base, h, aid, request_id="help"):
     return client.post(
         base + "/help-requests", headers=h, json={"attempt_id": aid, "request_id": request_id}
+    )
+
+
+def simulate_delivery(db, root, base, aid, help_id, *, void=False):
+    """Test-only representation of a later verified D or final delivery failure."""
+    sid, task_id = UUID(root.rsplit("/", 1)[1]), UUID(base.rsplit("/", 1)[1])
+    with Session(db) as s, s.begin():
+        lock_speaking(s, sid, task_id, UUID(aid))
+        row = s.scalar(
+            select(SpeakingHelpRequest)
+            .where(SpeakingHelpRequest.help_request_id == help_id)
+            .with_for_update()
+        )
+        assert row.status == "READY"
+        row.status = "VOIDED" if void else "DELIVERED"
+        if void:
+            row.error_code = "DELIVERY_FAILED"
+            row.execution_history = [*row.execution_history, {"status": "DELIVERY_FAILED"}]
+
+
+def test_delivered_history_and_voided_generated_text_are_isolated(db, client, flow):
+    root, base, h, aid = ready(client, flow)
+    first = UUID(help_request(client, base, h, aid, "first").json()["help_request_id"])
+    assert execute(
+        db,
+        claim(db, first, prompt="first prompt", contract=CONTRACT),
+        FakeGuidance({"guidance_text": "第一条"}),
+    )
+    assert help_request(client, base, h, aid, "premature").status_code == 409
+    with Session(db) as s:
+        assert s.get(SpeakingHelpRequest, first).input_frontier["delivered_guidance"] == []
+    simulate_delivery(db, root, base, aid, first)
+    with db.begin() as conn:
+        conn.execute(
+            text("UPDATE speaking_help_requests SET status='DELIVERED' WHERE help_request_id=:id"),
+            {"id": first},
+        )
+    actions = client.get(root, headers=h).json()["tasks"][0]["allowed_actions"]
+    assert "START_RECORDING" in actions and "REQUEST_HELP" in actions
+    second = UUID(help_request(client, base, h, aid, "second").json()["help_request_id"])
+    assert second != first
+    second_work = claim(db, second, prompt="second prompt", contract=CONTRACT)
+    assert second_work.context["delivered_guidance"] == [
+        {"help_request_id": str(first), "text": "第一条"}
+    ]
+    assert execute(db, second_work, FakeGuidance({"guidance_text": "未交付"}))
+    with Session(db) as s:
+        before = list(s.get(SpeakingHelpRequest, second).execution_history)
+        second_frontier = dict(s.get(SpeakingHelpRequest, second).input_frontier)
+    simulate_delivery(db, root, base, aid, second, void=True)
+    with Session(db) as s:
+        row = s.get(SpeakingHelpRequest, second)
+        assert row.status == "VOIDED" and row.guidance_text == "未交付"
+        assert (
+            row.execution_history[: len(before)] == before and row.error_code == "DELIVERY_FAILED"
+        )
+    third = UUID(help_request(client, base, h, aid, "third").json()["help_request_id"])
+    third_work = claim(db, third, prompt="third prompt", contract=CONTRACT)
+    assert third_work.context["delivered_guidance"] == [
+        {"help_request_id": str(first), "text": "第一条"}
+    ]
+    assert execute(db, third_work, FakeGuidance({"guidance_text": "第三条"}))
+    simulate_delivery(db, root, base, aid, third)
+    fourth = UUID(help_request(client, base, h, aid, "fourth").json()["help_request_id"])
+    fourth_work = claim(db, fourth, prompt="fourth prompt", contract=CONTRACT)
+    assert fourth_work.context["delivered_guidance"] == [
+        {"help_request_id": str(first), "text": "第一条"},
+        {"help_request_id": str(third), "text": "第三条"},
+    ]
+    with Session(db) as s:
+        assert s.get(SpeakingHelpRequest, second).input_frontier == second_frontier
+        assert [s.get(SpeakingHelpRequest, x).position for x in (first, second, third, fourth)] == [
+            1,
+            2,
+            3,
+            4,
+        ]
+    redo = client.post(
+        base + "/redo", headers=h, json={"redo_request_id": "redo", "expected_attempt_id": aid}
+    ).json()
+    new = redo["attempt_id"]
+    pid = client.post(
+        base + "/playbacks",
+        headers=h,
+        json={"attempt_id": new, "request_id": "new-prompt", "kind": "INITIAL_PROMPT"},
+    ).json()["playback_id"]
+    assert (
+        client.post(
+            base + f"/playbacks/{pid}/finish",
+            headers=h,
+            json={"attempt_id": new, "completed": True},
+        ).status_code
+        == 200
+    )
+    new_help = UUID(help_request(client, base, h, new, "new").json()["help_request_id"])
+    assert (
+        claim(db, new_help, prompt="new prompt", contract=CONTRACT).context["delivered_guidance"]
+        == []
     )
 
 
@@ -78,6 +178,107 @@ def test_empty_input_checkpoint_c_and_duplicate(db, client, flow):
     with Session(db) as s:
         playbacks = list(s.scalars(select(Playback).where(Playback.attempt_id == UUID(aid))))
         assert len(playbacks) == 1 and playbacks[0].kind == "INITIAL_PROMPT"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "status='DELIVERED', guidance_text='changed'",
+        "status='VOIDED', guidance_text=NULL",
+        "status='DELIVERED', execution_history='[]'::jsonb",
+        "status='VOIDED', prompt_sha256='changed'",
+    ],
+)
+def test_checkpoint_c_facts_cannot_be_rewritten_during_delivery(db, client, flow, change):
+    _root, base, h, aid = ready(client, flow)
+    help_id = UUID(help_request(client, base, h, aid).json()["help_request_id"])
+    assert execute(db, claim(db, help_id, prompt="prompt", contract=CONTRACT), FakeGuidance())
+    with pytest.raises(DBAPIError, match="immutable"), db.begin() as conn:
+        conn.execute(
+            text(f"UPDATE speaking_help_requests SET {change} WHERE help_request_id=:id"),
+            {"id": help_id},
+        )
+    with Session(db) as s:
+        row = s.get(SpeakingHelpRequest, help_id)
+        assert row.status == "READY" and row.guidance_text == "再说一些。"
+        assert len(row.execution_history) == 1
+
+
+def test_failure_audit_history_is_append_only(db, client, flow):
+    _root, base, h, aid = ready(client, flow)
+    help_id = UUID(help_request(client, base, h, aid).json()["help_request_id"])
+    assert execute(
+        db, claim(db, help_id, prompt="prompt", contract=CONTRACT), FakeGuidance("ERROR")
+    )
+    with pytest.raises(DBAPIError, match="immutable"), db.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE speaking_help_requests SET execution_history='[]'::jsonb WHERE help_request_id=:id"
+            ),
+            {"id": help_id},
+        )
+    with Session(db) as s:
+        assert (
+            s.get(SpeakingHelpRequest, help_id).execution_history[0]["error_code"]
+            == "LLM_AUTHENTICATION"
+        )
+
+
+def test_delivery_and_next_help_serialize(db, client, flow):
+    import time
+
+    root, base, h, aid = ready(client, flow)
+    first = UUID(help_request(client, base, h, aid, "first").json()["help_request_id"])
+    assert execute(db, claim(db, first, prompt="prompt", contract=CONTRACT), FakeGuidance())
+    held, release, entering = Event(), Event(), Event()
+
+    def deliver():
+        with Session(db) as s, s.begin():
+            lock_speaking(s, UUID(root.rsplit("/", 1)[1]), UUID(base.rsplit("/", 1)[1]), UUID(aid))
+            row = s.scalar(
+                select(SpeakingHelpRequest)
+                .where(SpeakingHelpRequest.help_request_id == first)
+                .with_for_update()
+            )
+            row.status = "DELIVERED"
+            s.flush()
+            held.set()
+            assert release.wait(10)
+
+    def request_next():
+        assert held.wait(10)
+        entering.set()
+        return help_request(client, base, h, aid, "next")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delivery, request = pool.submit(deliver), pool.submit(request_next)
+        try:
+            assert entering.wait(10)
+            with db.connect() as conn:
+                schema = conn.scalar(text("SELECT current_schema()"))
+                deadline, blocked = time.monotonic() + 10, False
+                while time.monotonic() < deadline:
+                    blocked = conn.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=:s AND cardinality(pg_blocking_pids(pid)) > 0)"
+                        ),
+                        {"s": schema},
+                    )
+                    conn.commit()
+                    if blocked:
+                        break
+                    time.sleep(0.05)
+                assert blocked
+        finally:
+            release.set()
+        delivery.result(timeout=10)
+        result = request.result(timeout=10)
+    assert result.status_code == 200
+    with Session(db) as s:
+        row = s.get(SpeakingHelpRequest, UUID(result.json()["help_request_id"]))
+        assert row.input_frontier["delivered_guidance"] == [
+            {"help_request_id": str(first), "text": "再说一些。"}
+        ]
 
 
 @pytest.mark.parametrize("mode", ["TEXT", "NO_TEXT"])
