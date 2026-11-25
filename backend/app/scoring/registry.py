@@ -9,6 +9,10 @@ from app.evaluation.asr_contract import SOURCE as QWEN_ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as QWEN_ASR_VERSION
 from app.evaluation.asr_contract import recognition_result as qwen_asr_recognition_result
 from app.evaluation.asr_contract import valid_parameters as valid_qwen_asr_parameters
+from app.evaluation.speaking_qwen_contract import SOURCE as SPEAKING_QWEN_SOURCE
+from app.evaluation.speaking_qwen_contract import VERSION as SPEAKING_QWEN_VERSION
+from app.evaluation.speaking_qwen_contract import valid_full_consumption, valid_parameters
+from app.evaluation.speaking_qwen_contract import validate_result as speaking_qwen_result
 
 
 class ScoringUnavailable(ValueError):
@@ -255,4 +259,13 @@ QWEN_ASR_CONTRACT = EvaluationContract(
     False,
     recognition_result=qwen_asr_recognition_result,
 )
-PRODUCTION_REGISTRY = Registry(contracts=[QWEN_ASR_CONTRACT])
+SPEAKING_QWEN_ASR_CONTRACT = EvaluationContract(
+    SPEAKING_QWEN_SOURCE,
+    SPEAKING_QWEN_VERSION,
+    frozenset({"speaking"}),
+    valid_parameters,
+    False,
+    speaking_consumption_validator=valid_full_consumption,
+    speaking_recognition_result=speaking_qwen_result,
+)
+PRODUCTION_REGISTRY = Registry(contracts=[QWEN_ASR_CONTRACT, SPEAKING_QWEN_ASR_CONTRACT])

@@ -497,6 +497,12 @@ def _claim_job(
             s.flush()
             return None
         job.last_checked_at = s.scalar(select(func.clock_timestamp()))
+        if (job.requirement.get("source"), job.requirement.get("version")) == (
+            "dashscope-speaking-qwen3-asr",
+            "1",
+        ):
+            job.error_code = "EVALUATION_REQUIRES_SEGMENT_COORDINATOR"
+            return None
         entry = s.get(PaperEntry, job.paper_entry_id)
         revision = s.get(TaskRevision, entry.task_revision_id)
         plan = s.get(EvaluationPlan, job.paper_entry_id)
