@@ -96,6 +96,8 @@ Speaking 主动重播使用公共 Playback 的 `USER_REPLAY` 和稳定 `request_
 
 Speaking 的最低累计录音时长是数据库中的当前运行政策，初始未配置。教师管理凭据可通过 `PUT /teacher/assessment/speaking-policy` 设置正数 `minimum_duration_seconds`，通过同一路径的 GET 查询；施测 Session 凭据不能修改该政策。政策变更立即影响未提交 Attempt，不改变已接受的 Submission。Session 状态返回当前门槛、累计时长、资格及原因；符合条件只开放 `FINISH_SPEAKING`，不会自动提交。儿童显式调用 `POST /assessment/sessions/{session_id}/tasks/{task_id}/submissions/speaking`，传入 `attempt_id` 和稳定 `finish_request_id`；成功后重传相同身份可恢复 Submission。`speaking-input-v1` 清单固定有序录音及 ASR 身份、已交付求助、有效重播、实际政策值和版本；评分适配器须消费该清单，正式 Speaking 评价适配器仍待后续实现。
 
+Speaking 正式评价 Worker 独立核验 `speaking-input-v1`，将完整有序来源及其 `speaking-source-v1` SHA-256 固定在 Job/RawEvaluation 的 `input_refs.speaking_source`，与适配器消费引用和 payload 一并参与指纹。未来 Speaking `EvaluationContract` 必须提供 `speaking_consumption_validator(source, consumption, requirement, upstream, payload)`，并在 `InputSnapshot.refs.speaking_consumption` 声明实际输入；回调须校验来源归属、消费与上游身份及可用的 payload，审计已保存证据时 `payload` 为 `None`，仍须校验引用。可用 `segment_ids` 声明片段子集，`derived_recordings` 声明包含 `storage_ref`、`sha256`、`media_type` 的派生音频；Worker 在领取及外呼前核验音频字节。不同根目录可通过 `recording_store` 和 `derived_recording_store` 显式注入。完整来源锚定不要求每个评价源消费所有片段；具体粒度、派生规则及正式 Speaking 评价合同尚未确定。
+
 ## 结算扫描入口
 
 `app.scoring.worker.run_settlement_once(engine, registry=registry, batch_size=100)` 推进数据库中有 `SettlementIntent` 和 `CloseManifest` 且状态为 `INPUT_CLOSED` 的 Session。`batch_size` 是单次查询的分页大小：每轮依次遍历符合条件的场次，逐场使用独立的 `READ COMMITTED` 事务；等待中的场次不会永久占住分页，已锁定场次留待下一轮。返回值包含 `completed`、`pending`、`skipped_locked` 和 `failures`；调用方须检查失败项。失败项包括 Session 身份、异常类型和代码位置，不包含可能敏感的异常内容。历史复核策略不能解释时，`pending` 中提供策略诊断，其他场次仍继续处理。

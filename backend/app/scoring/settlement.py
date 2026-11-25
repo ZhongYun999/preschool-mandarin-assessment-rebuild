@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
-from app.evaluation.worker import _upstream_asr
+from app.evaluation.worker import _upstream_asr, speaking_source, valid_speaking_consumption
 from app.papers.paper import EvaluationPlan, Paper, PaperEntry
 from app.scoring.models import (
     AutomaticPaperScore,
@@ -42,6 +42,11 @@ def _json_result(value):
 
 def _evidence(db, submission, entry, revision, plan, registry):
     evidence = []
+    source = (
+        speaking_source(db, submission, entry, revision)
+        if revision.task_type == "speaking"
+        else None
+    )
     for index, requirement in enumerate(plan.requirements):
         if not registry.supports(revision.task_type, requirement):
             raise ScoringUnavailable("Frozen evaluation contract is unavailable")
@@ -69,12 +74,22 @@ def _evidence(db, submission, entry, revision, plan, registry):
             or refs.get("submission_id") != str(submission.submission_id)
             or refs.get("paper_entry_id") != str(entry.paper_entry_id)
             or refs.get("task_revision_id") != str(revision.task_revision_id)
+            or (
+                source is not None
+                and (
+                    refs.get("speaking_source") != source
+                    or not isinstance(refs.get("dependencies"), dict)
+                    or not valid_speaking_consumption(
+                        registry, requirement, source, refs["dependencies"]
+                    )
+                )
+            )
         ):
             raise ValueError("Evaluation evidence identity does not match frozen input")
         if "depends_on" in requirement:
             if not registry.valid_dependency(revision.task_type, plan.requirements, index):
                 raise ScoringUnavailable("Frozen evaluation dependency is unavailable")
-            upstream = _upstream_asr(db, job, submission, revision, plan, registry)
+            upstream = _upstream_asr(db, job, submission, revision, plan, registry, source)
             dependencies = refs.get("dependencies")
             if (
                 upstream is None
