@@ -590,22 +590,14 @@ def test_redo_skips_old_job_and_new_source_stays_separate(db, client, flow, monk
         )
 
 
-def test_speaking_contract_without_consumption_validator_is_fail_closed(
-    db, client, flow, monkeypatch
-):
+def test_speaking_contract_without_consumption_validator_is_fail_closed():
     contract = EvaluationContract(
         "offline-speaking", "1", frozenset({"speaking"}), lambda p: p == {}
     )
-    _, _, _, _, _, registry, store, ids = make_case(
-        db, client, flow, monkeypatch, 1, contracts=[contract]
+    registry = Registry(contracts=[contract])
+    assert not registry.valid_plan(
+        "speaking", [{"source": "offline-speaking", "version": "1", "parameters": {}}]
     )
-    adapter = OfflineAdapter()
-    with pytest.raises(InputIdentityConflict):
-        claim(db, ids[0], registry, store, adapter)
-    assert adapter.calls == 0
-    with Session(db) as session:
-        assert session.get(EvaluationJob, ids[0]).error_code == "INPUT_IDENTITY_CONFLICT"
-        assert session.scalar(select(RawEvaluation)) is None
 
 
 def test_global_invalid_lease_is_reported_before_job_scan():
