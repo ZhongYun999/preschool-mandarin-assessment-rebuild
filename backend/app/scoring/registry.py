@@ -37,6 +37,19 @@ class EvaluationContract:
     review_recommendation: Callable[[Mapping[str, Any]], bool] | bool | None = None
     recognition_result: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
     accepts_no_text: bool | None = None
+    speaking_consumption_validator: (
+        Callable[
+            [
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any] | None,
+                Mapping[str, Any] | None,
+            ],
+            bool,
+        ]
+        | None
+    ) = None
 
 
 class Registry:
@@ -49,6 +62,10 @@ class Registry:
         if any(
             (c.recognition_result is not None and not callable(c.recognition_result))
             or (c.accepts_no_text is not None and type(c.accepts_no_text) is not bool)
+            or (
+                c.speaking_consumption_validator is not None
+                and not callable(c.speaking_consumption_validator)
+            )
             for c in contracts
         ):
             raise ValueError("Invalid recognition dependency contract")
@@ -146,6 +163,21 @@ class Registry:
     def recognition_contract(self, requirement: Mapping[str, Any]) -> bool:
         contract = self._contracts.get((requirement["source"], requirement["version"]))
         return bool(contract and contract.recognition_result is not None)
+
+    def validate_speaking_consumption(
+        self, requirement, source, consumption, upstream=None, payload=None
+    ):
+        contract = self._contracts.get((requirement["source"], requirement["version"]))
+        return bool(
+            contract
+            and contract.speaking_consumption_validator
+            and isinstance(consumption, dict)
+            and consumption
+            and contract.speaking_consumption_validator(
+                source, consumption, requirement, upstream, payload
+            )
+            is True
+        )
 
     def recognition_result(
         self, requirement: Mapping[str, Any], payload: Mapping[str, Any]

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.media.recording import Recording
+from app.media.recording_store import RecordingStore
 from app.papers.paper import EvaluationPlan, PaperEntry
 from app.scoring.registry import Registry
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
@@ -74,6 +75,8 @@ class Claim:
     requirement: dict
     adapter: Adapter
     registry: Registry
+    recording_store: RecordingStore | None = None
+    derived_recording_store: RecordingStore | None = None
 
 
 def _json(value: Any) -> str:
@@ -238,6 +241,147 @@ def _recording_identity(session: Session, submission: Submission) -> dict:
     return {key: recording[key] for key in ("recording_id", "sha256", "media_type")}
 
 
+def speaking_source(
+    session: Session,
+    submission: Submission,
+    entry: PaperEntry,
+    revision: TaskRevision,
+    *,
+    store: RecordingStore | None = None,
+) -> dict:
+    """Resolve the whole frozen audio source from immutable facts, never from an adapter."""
+    from app.task_types.speaking import SpeakingSegment
+
+    inputs = submission.inputs
+    task = session.get(SessionTask, submission.session_task_id)
+    attempt = session.get(Attempt, submission.attempt_id)
+    persisted = session.get(Submission, submission.submission_id)
+    if (
+        not isinstance(inputs, dict)
+        or inputs.get("schema") != "speaking-input-v1"
+        or task is None
+        or attempt is None
+        or attempt.session_task_id != submission.session_task_id
+        or persisted is None
+        or persisted.attempt_id != submission.attempt_id
+        or persisted.session_task_id != submission.session_task_id
+        or persisted.inputs != inputs
+        or task.paper_entry_id != entry.paper_entry_id
+        or entry.task_revision_id != revision.task_revision_id
+        or revision.task_type != "speaking"
+        or inputs.get("paper_entry_id") != str(entry.paper_entry_id)
+        or inputs.get("task_revision_id") != str(revision.task_revision_id)
+        or not isinstance(inputs.get("segments"), list)
+        or not inputs["segments"]
+    ):
+        raise InputIdentityConflict("Invalid Speaking source manifest")
+    facts = list(
+        session.scalars(
+            select(SpeakingSegment)
+            .where(SpeakingSegment.attempt_id == submission.attempt_id)
+            .order_by(SpeakingSegment.position)
+        )
+    )
+    if len(facts) != len(inputs["segments"]):
+        raise InputIdentityConflict("Speaking source segment count mismatch")
+    ordered = []
+    for fact, frozen in zip(facts, inputs["segments"], strict=True):
+        if not isinstance(frozen, dict):
+            raise InputIdentityConflict("Invalid Speaking segment")
+        recording = session.get(Recording, fact.recording_id)
+        if (
+            recording is None
+            or recording.status != "SAVED"
+            or recording.attempt_id != submission.attempt_id
+            or frozen.get("segment_id") != str(fact.segment_id)
+            or frozen.get("recording_id") != str(recording.recording_id)
+            or type(frozen.get("position")) is not int
+            or frozen["position"] != fact.position
+            or frozen.get("storage_ref") != recording.storage_ref
+            or frozen.get("sha256") != recording.sha256
+            or frozen.get("media_type") != recording.media_type
+        ):
+            raise InputIdentityConflict("Speaking segment identity mismatch")
+        if store is not None:
+            try:
+                store.verify(recording.storage_ref, recording.sha256)
+            except (ValueError, OSError):
+                raise InputIdentityConflict("Speaking recording unavailable") from None
+        ordered.append(
+            {
+                "segment_id": str(fact.segment_id),
+                "recording_id": str(recording.recording_id),
+                "position": fact.position,
+                "storage_ref": recording.storage_ref,
+                "sha256": recording.sha256,
+                "media_type": recording.media_type,
+            }
+        )
+    source = {
+        "schema": "speaking-source-v1",
+        "submission_id": str(submission.submission_id),
+        "attempt_id": str(submission.attempt_id),
+        "paper_entry_id": str(entry.paper_entry_id),
+        "task_revision_id": str(revision.task_revision_id),
+        "submission_schema": inputs["schema"],
+        "segments": ordered,
+    }
+    return {**source, "sha256": hashlib.sha256(_json(source).encode()).hexdigest()}
+
+
+def valid_speaking_consumption(
+    registry, requirement, source, dependencies, *, payload=None, derived_store=None
+):
+    """Validate common audio references, then the source-specific consumption contract."""
+    if not isinstance(dependencies, dict):
+        return False
+    consumption = dependencies.get("speaking_consumption")
+    if not isinstance(consumption, dict) or not consumption:
+        return False
+    ids = consumption.get("segment_ids")
+    if ids is not None and (
+        not isinstance(ids, list)
+        or any(not isinstance(i, str) for i in ids)
+        or len(ids) != len(set(ids))
+        or not set(ids).issubset({s["segment_id"] for s in source["segments"]})
+    ):
+        return False
+    derived = consumption.get("derived_recordings")
+    if derived is not None:
+        if not isinstance(derived, list):
+            return False
+        for item in derived:
+            if not isinstance(item, dict) or not all(
+                isinstance(item.get(k), str) and item[k]
+                for k in ("storage_ref", "sha256", "media_type")
+            ):
+                return False
+            if derived_store is not None:
+                try:
+                    derived_store.verify(item["storage_ref"], item["sha256"])
+                except (ValueError, OSError):
+                    return False
+    frozen = _json(
+        {
+            "source": source,
+            "dependencies": dependencies,
+            "payload": payload,
+            "requirement": requirement,
+        }
+    )
+    valid = registry.validate_speaking_consumption(
+        requirement, source, consumption, dependencies.get("asr"), payload
+    )
+    return valid and frozen == _json(
+        {
+            "source": source,
+            "dependencies": dependencies,
+            "payload": payload,
+            "requirement": requirement,
+        }
+    )
+
+
 def _upstream_asr(
     session: Session,
     job: EvaluationJob,
@@ -245,6 +389,7 @@ def _upstream_asr(
     revision: TaskRevision,
     plan: EvaluationPlan,
     registry: Registry,
+    speaking_input: dict | None = None,
 ):
     dependency = job.requirement.get("depends_on")
     if dependency is None:
@@ -266,7 +411,7 @@ def _upstream_asr(
         )
     )
     refs = upstream.input_refs or {}
-    recording = _recording_identity(session, submission)
+    recording = _recording_identity(session, submission) if speaking_input is None else None
     if (
         upstream.requirement != expected
         or raw is None
@@ -277,7 +422,19 @@ def _upstream_asr(
         or refs.get("paper_entry_id") != str(job.paper_entry_id)
         or refs.get("task_revision_id") != str(revision.task_revision_id)
         or not isinstance(refs.get("dependencies"), dict)
-        or any(refs["dependencies"].get(k) != v for k, v in recording.items())
+        or (
+            recording is not None
+            and any(refs["dependencies"].get(k) != v for k, v in recording.items())
+        )
+        or (
+            speaking_input is not None
+            and (
+                refs.get("speaking_source") != speaking_input
+                or not valid_speaking_consumption(
+                    registry, expected, speaking_input, refs["dependencies"]
+                )
+            )
+        )
     ):
         raise InputIdentityConflict("Upstream recognition evidence identity mismatch")
     result = registry.recognition_result(expected, raw.payload)
@@ -297,7 +454,14 @@ def _upstream_asr(
         "submission_id": str(submission.submission_id),
         "paper_entry_id": str(job.paper_entry_id),
         "task_revision_id": str(revision.task_revision_id),
-        **recording,
+        **(
+            recording
+            if recording is not None
+            else {
+                "speaking_source_sha256": speaking_input["sha256"],
+                "speaking_consumption": refs["dependencies"]["speaking_consumption"],
+            }
+        ),
     }
     return identity, result
 
@@ -309,6 +473,8 @@ def _claim_job(
     registry: Registry,
     adapters: Mapping[tuple[str, str], Adapter],
     lease: timedelta,
+    recording_store: RecordingStore | None = None,
+    derived_recording_store: RecordingStore | None = None,
 ) -> Claim | None:
     if not isinstance(lease, timedelta) or lease <= timedelta(0):
         raise ValueError("Lease must be positive")
@@ -337,6 +503,7 @@ def _claim_job(
             raise ValueError("Frozen evaluation dependency plan is invalid")
         adapter = adapters.get((job.requirement["source"], job.requirement["version"]))
         if adapter is None:
+            job.error_code = "EVALUATION_ADAPTER_UNAVAILABLE"
             return None
         if not registry.supports(revision.task_type, job.requirement):
             job.error_code = "EVALUATION_CONTRACT_UNAVAILABLE"
@@ -345,7 +512,14 @@ def _claim_job(
             revision.task_type, plan.requirements, job.requirement_index
         ):
             return None
-        upstream = _upstream_asr(s, job, submission, revision, plan, registry)
+        source = (
+            speaking_source(
+                s, submission, entry, revision, store=recording_store or RecordingStore()
+            )
+            if revision.task_type == "speaking"
+            else None
+        )
+        upstream = _upstream_asr(s, job, submission, revision, plan, registry, source)
         if "depends_on" in job.requirement and upstream is None:
             return None
         inputs = adapter.resolve_inputs(s, submission, revision, job.requirement)
@@ -358,7 +532,7 @@ def _claim_job(
         ):
             raise TypeError("Adapter inputs must be structured facts")
         inputs = InputSnapshot(json.loads(_json(inputs.refs)), json.loads(_json(inputs.payload)))
-        if registry.recognition_contract(job.requirement):
+        if registry.recognition_contract(job.requirement) and source is None:
             recording = _recording_identity(s, submission)
             if any(inputs.refs.get(k) != v for k, v in recording.items()):
                 raise InputIdentityConflict("Recognition input recording identity mismatch")
@@ -366,12 +540,23 @@ def _claim_job(
             if "asr" in inputs.refs or "asr" in inputs.payload:
                 raise ValueError("Reserved upstream input key")
             inputs.refs["asr"], inputs.payload["asr"] = upstream
+        if source is not None and not valid_speaking_consumption(
+            registry,
+            job.requirement,
+            source,
+            inputs.refs,
+            payload=inputs.payload,
+            derived_store=derived_recording_store or recording_store or RecordingStore(),
+        ):
+            raise InputIdentityConflict("Speaking consumption identity is invalid")
         refs = {
             "submission_id": str(submission.submission_id),
             "task_revision_id": str(revision.task_revision_id),
             "paper_entry_id": str(entry.paper_entry_id),
             "dependencies": inputs.refs,
         }
+        if source is not None:
+            refs["speaking_source"] = source
         digest = hashlib.sha256(
             _json(
                 {"refs": refs, "payload": inputs.payload, "requirement": job.requirement}
@@ -390,7 +575,16 @@ def _claim_job(
         job.attempts += 1
         s.flush()
         return Claim(
-            job.job_id, token, inputs, json.loads(_json(job.requirement)), adapter, registry
+            job.job_id,
+            token,
+            inputs,
+            json.loads(_json(job.requirement)),
+            adapter,
+            registry,
+            recording_store or RecordingStore() if source is not None else None,
+            (derived_recording_store or recording_store or RecordingStore())
+            if source is not None
+            else None,
         )
 
 
@@ -401,9 +595,19 @@ def claim_job(
     registry: Registry,
     adapters: Mapping[tuple[str, str], Adapter],
     lease: timedelta,
+    recording_store: RecordingStore | None = None,
+    derived_recording_store: RecordingStore | None = None,
 ) -> Claim | None:
     try:
-        return _claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+        return _claim_job(
+            engine,
+            job_id,
+            registry=registry,
+            adapters=adapters,
+            lease=lease,
+            recording_store=recording_store,
+            derived_recording_store=derived_recording_store,
+        )
     except InputIdentityConflict:
         # The failed claim rolled back. Preserve a non-sensitive diagnostic without
         # changing the frozen input, using the same session-to-job lock order.
@@ -469,7 +673,7 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
         context = _lock_job_context(s, claim.job_id)
         if context is None:
             return False
-        live, _, current = context
+        live, submission, current = context
         now = s.scalar(select(func.clock_timestamp()))
         if (
             live.status != "RUNNING"
@@ -482,6 +686,28 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
             _skip(live)
             s.flush()
             return False
+        entry = s.get(PaperEntry, live.paper_entry_id)
+        revision = s.get(TaskRevision, entry.task_revision_id)
+        if revision.task_type == "speaking":
+            try:
+                source = speaking_source(
+                    s, submission, entry, revision, store=claim.recording_store or RecordingStore()
+                )
+                if source != live.input_refs.get(
+                    "speaking_source"
+                ) or not valid_speaking_consumption(
+                    claim.registry,
+                    live.requirement,
+                    source,
+                    claim.inputs.refs,
+                    payload=claim.inputs.payload,
+                    derived_store=claim.derived_recording_store or RecordingStore(),
+                ):
+                    raise InputIdentityConflict("Speaking input changed before dispatch")
+            except InputIdentityConflict:
+                live.status, live.claim_token, live.lease_until = "WAITING", None, None
+                live.error_code = "INPUT_IDENTITY_CONFLICT"
+                return False
         fingerprint = hashlib.sha256(
             _json(
                 {
@@ -604,10 +830,14 @@ def run_once(
     adapters: Mapping[tuple[str, str], Adapter],
     lease: timedelta,
     batch_size: int,
+    recording_store: RecordingStore | None = None,
+    derived_recording_store: RecordingStore | None = None,
 ) -> dict[str, int]:
     """Scan bounded persistent batches; no in-memory queue survives a call."""
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
         raise ValueError("Batch size must be positive")
+    if not isinstance(lease, timedelta) or lease <= timedelta(0):
+        raise ValueError("Lease must be positive")
     with Session(engine) as s, s.begin():
         scheduled = schedule(s, limit=batch_size)
         recovered = recover_expired(s, limit=batch_size)
@@ -621,12 +851,47 @@ def run_once(
     claimed = finished = 0
     for job_id in ids:
         try:
-            work = claim_job(engine, job_id, registry=registry, adapters=adapters, lease=lease)
+            work = claim_job(
+                engine,
+                job_id,
+                registry=registry,
+                adapters=adapters,
+                lease=lease,
+                recording_store=recording_store,
+                derived_recording_store=derived_recording_store,
+            )
         except InputIdentityConflict:
+            continue
+        except Exception:  # noqa: BLE001 - isolate a job; never persist exception text
+            with Session(engine) as session, session.begin():
+                context = _lock_job_context(session, job_id)
+                if context is not None:
+                    job, _, current = context
+                    if current and job.status == "WAITING":
+                        job.error_code = "INPUT_RESOLUTION_FAILED"
+                        job.last_checked_at = session.scalar(select(func.clock_timestamp()))
             continue
         if work is not None:
             claimed += 1
-            finished += int(execute_claim(engine, work))
+            try:
+                finished += int(execute_claim(engine, work))
+            except Exception as exc:  # noqa: BLE001 - leave dispatched outcomes for UNKNOWN recovery
+                with Session(engine) as session, session.begin():
+                    context = _lock_job_context(session, job_id)
+                    if context is not None:
+                        job, _, current = context
+                        if (
+                            current
+                            and job.status == "RUNNING"
+                            and job.claim_token == work.token
+                            and job.dispatch_started_at is None
+                        ):
+                            job.status, job.claim_token, job.lease_until = "WAITING", None, None
+                            job.error_code = (
+                                "INPUT_IDENTITY_CONFLICT"
+                                if isinstance(exc, InputIdentityConflict)
+                                else "EVALUATION_PREPARATION_FAILED"
+                            )
     return {
         "scheduled": scheduled,
         "recovered": recovered,
