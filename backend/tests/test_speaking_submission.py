@@ -373,7 +373,11 @@ def test_frozen_plan_creates_single_intent_and_job(db, client, flow, monkeypatch
             plugins,
             [
                 EvaluationContract(
-                    "fake-speaking", "1", frozenset({"speaking"}), lambda params: params == {}
+                    "fake-speaking",
+                    "1",
+                    frozenset({"speaking"}),
+                    lambda params: params == {},
+                    speaking_consumption_validator=lambda *args: True,
                 )
             ],
         ),

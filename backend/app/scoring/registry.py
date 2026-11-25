@@ -50,6 +50,7 @@ class EvaluationContract:
         ]
         | None
     ) = None
+    speaking_recognition_result: Callable[..., Mapping[str, Any]] | None = None
 
 
 class Registry:
@@ -61,6 +62,10 @@ class Registry:
         self._requirements = {}
         if any(
             (c.recognition_result is not None and not callable(c.recognition_result))
+            or (
+                c.speaking_recognition_result is not None
+                and not callable(c.speaking_recognition_result)
+            )
             or (c.accepts_no_text is not None and type(c.accepts_no_text) is not bool)
             or (
                 c.speaking_consumption_validator is not None
@@ -115,6 +120,7 @@ class Registry:
         if (
             contract is None
             or task_type not in contract.task_types
+            or (task_type == "speaking" and not callable(contract.speaking_consumption_validator))
             or not contract.validate_parameters(params)
         ):
             return False
@@ -150,7 +156,10 @@ class Registry:
         ):
             return False
         contract = self._contracts.get((ref["source"], ref["version"]))
-        return contract is not None and callable(contract.recognition_result)
+        return contract is not None and (
+            callable(contract.recognition_result)
+            or (task_type == "speaking" and callable(contract.speaking_recognition_result))
+        )
 
     def valid_plan(self, task_type: str, requirements: Any) -> bool:
         return isinstance(requirements, list) and all(
@@ -162,7 +171,9 @@ class Registry:
 
     def recognition_contract(self, requirement: Mapping[str, Any]) -> bool:
         contract = self._contracts.get((requirement["source"], requirement["version"]))
-        return bool(contract and contract.recognition_result is not None)
+        return bool(
+            contract and (contract.recognition_result or contract.speaking_recognition_result)
+        )
 
     def validate_speaking_consumption(
         self, requirement, source, consumption, upstream=None, payload=None
@@ -180,9 +191,24 @@ class Registry:
         )
 
     def recognition_result(
-        self, requirement: Mapping[str, Any], payload: Mapping[str, Any]
+        self,
+        requirement: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        *,
+        speaking_source=None,
+        speaking_consumption=None,
+        provider=None,
+        model=None,
     ) -> dict:
         contract = self._contracts[(requirement["source"], requirement["version"])]
+        if speaking_source is not None and contract.speaking_recognition_result is not None:
+            if speaking_consumption is None:
+                raise ValueError("Speaking recognition requires frozen source and consumption")
+            return contract.speaking_recognition_result(
+                payload, requirement, speaking_source, speaking_consumption, provider, model
+            )
+        if contract.recognition_result is None:
+            raise ValueError("Recognition result is incompatible with input")
         result = contract.recognition_result(payload)
         if (
             not isinstance(result, dict)

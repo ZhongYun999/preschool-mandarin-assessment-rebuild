@@ -437,7 +437,14 @@ def _upstream_asr(
         )
     ):
         raise InputIdentityConflict("Upstream recognition evidence identity mismatch")
-    result = registry.recognition_result(expected, raw.payload)
+    result = registry.recognition_result(
+        expected,
+        raw.payload,
+        speaking_source=speaking_input,
+        speaking_consumption=refs["dependencies"].get("speaking_consumption"),
+        provider=raw.provider,
+        model=raw.model,
+    )
     if result["status"] == "NO_TEXT" and not registry.accepts_no_text(job.requirement):
         if job.status == "WAITING":
             job.error_code = "ASR_NO_TEXT_NOT_ACCEPTED"
@@ -669,6 +676,7 @@ def _finish(
 
 def execute_claim(engine: Engine, claim: Claim) -> bool:
     """Mark dispatch under the session lock, then call the adapter without a DB transaction."""
+    recognition_source = None
     with Session(engine) as s, s.begin():
         context = _lock_job_context(s, claim.job_id)
         if context is None:
@@ -704,6 +712,7 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
                     derived_store=claim.derived_recording_store or RecordingStore(),
                 ):
                     raise InputIdentityConflict("Speaking input changed before dispatch")
+                recognition_source = source
             except InputIdentityConflict:
                 live.status, live.claim_token, live.lease_until = "WAITING", None, None
                 live.error_code = "INPUT_IDENTITY_CONFLICT"
@@ -755,7 +764,14 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
         if not claim.adapter.validate_result(result, requirement):
             raise ValueError("Invalid contract")
         if claim.registry.recognition_contract(requirement):
-            claim.registry.recognition_result(requirement, result.payload)
+            claim.registry.recognition_result(
+                requirement,
+                result.payload,
+                speaking_source=recognition_source,
+                speaking_consumption=claim.inputs.refs.get("speaking_consumption"),
+                provider=result.provider,
+                model=result.model,
+            )
     except Exception:  # noqa: BLE001 - invalid contract output is not a score
         metadata = None
         if isinstance(result, AdapterResult):
