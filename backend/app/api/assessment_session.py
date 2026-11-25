@@ -8,14 +8,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.assessment_auth import assessment_read_db, require_read_session_access
+from app.api.assessment_repetition import get_recording_store
 from app.api.teacher_api import get_audio_store
 from app.media.fixed_audio import AudioStore, FixedAudio
 from app.media.recording import Recording
+from app.media.recording_store import RecordingStore
 from app.papers.paper import PaperEntry
 from app.scoring.models import FinalScoreResult
 from app.sessions.assessment_session import AssessmentSession, Attempt, SessionTask
 from app.sessions.submission import Playback, Submission, _busy, _completed, effective_replay_ids
-from app.task_types.speaking import SpeakingSegment, replay_frozen_resource, replay_target
+from app.task_types.speaking import (
+    SpeakingSegment,
+    finish_qualification,
+    replay_frozen_resource,
+    replay_target,
+)
 from app.task_types.speaking_asr import SpeakingASR
 from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest, active_help
 from app.taskbank.models import TaskRevision
@@ -24,6 +31,7 @@ router = APIRouter(prefix="/assessment")
 authorized_dependency = Depends(require_read_session_access)
 read_db_dependency = Depends(assessment_read_db)
 audio_store_dependency = Depends(get_audio_store)
+recording_store_dependency = Depends(get_recording_store)
 
 
 class TaskState(BaseModel):
@@ -102,6 +110,7 @@ def session_state(
     authorized: UUID = authorized_dependency,
     db: Session = read_db_dependency,
     store: AudioStore = audio_store_dependency,
+    recording_store: RecordingStore = recording_store_dependency,
 ):
     owner = db.get(AssessmentSession, authorized)
     rows = db.execute(
@@ -114,7 +123,7 @@ def session_state(
     tasks = []
     for task, position, task_type, guide_text in rows:
         attempt = db.get(Attempt, task.current_attempt_id) if task.current_attempt_id else None
-        submission = bool(
+        submission_id = (
             attempt
             and db.scalar(
                 select(Submission.submission_id).where(
@@ -122,7 +131,8 @@ def session_state(
                     Submission.session_task_id == task.session_task_id,
                 )
             )
-        )
+        ) or None
+        submission = submission_id is not None
         recordings = (
             list(db.scalars(select(Recording).where(Recording.attempt_id == attempt.attempt_id)))
             if attempt and task_type in ("repetition", "qa", "speaking")
@@ -203,6 +213,11 @@ def session_state(
             if delivered
             else None
         )
+        qualification = None
+        if attempt and task_type == "speaking":
+            entry = db.get(PaperEntry, task.paper_entry_id)
+            revision = db.get(TaskRevision, entry.task_revision_id)
+            qualification = finish_qualification(db, task, attempt, revision, recording_store)
         replay_source, replay_audio, replay_help = (None, None, None)
         replay_available = False
         replay_rows, active_replay, replay_retry_ids = [], None, []
@@ -290,6 +305,8 @@ def session_state(
                         actions.append("START_USER_REPLAY")
                     if replay_retry_ids:
                         actions.append("RETRY_PLAYBACK")
+                    if qualification["eligible"]:
+                        actions.append("FINISH_SPEAKING")
                 if (
                     pending_asr
                     and pending_asr[-1] is not None
@@ -314,7 +331,9 @@ def session_state(
                 saved_recording_ids=saved_recording_ids,
                 allowed_actions=actions,
                 speaking={
-                    "phase": "DELIVERING_GUIDANCE"
+                    "phase": "SEALED"
+                    if attempt.status == "SEALED"
+                    else "DELIVERING_GUIDANCE"
                     if help_request is not None and help_request.status == "READY"
                     else "RECOVERABLE_ERROR"
                     if help_request is not None and help_request.status in ("FAILED", "UNKNOWN")
@@ -334,6 +353,12 @@ def session_state(
                     if guide_complete and initial_complete
                     else "DELIVERING_INITIAL",
                     "checkpoint_a": bool(segments),
+                    "minimum_duration_seconds": qualification["minimum"],
+                    "minimum_duration_met": qualification["minimum_met"],
+                    "finish_eligible": qualification["eligible"],
+                    "finish_unavailable_reason": qualification["reason"],
+                    "submission_id": submission_id,
+                    "submission_status": "ACCEPTED" if submission else None,
                     "asr_status": recognition[segments[-1].segment_id].status
                     if segments and segments[-1].segment_id in recognition
                     else None,
@@ -413,7 +438,7 @@ def session_state(
                     "pending_recording_ids": [
                         r.recording_id for r in recordings if r.status == "STARTED"
                     ],
-                    "total_duration_seconds": sum(s.duration_seconds for s in segments),
+                    "total_duration_seconds": qualification["total"],
                     "segments": [
                         {
                             "segment_id": s.segment_id,

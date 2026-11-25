@@ -94,6 +94,8 @@ Checkpoint C 后生成独立的引导音频操作，Session 状态返回其 `aud
 
 Speaking 主动重播使用公共 Playback 的 `USER_REPLAY` 和稳定 `request_id`，无需客户端指定音频：服务端选择本 Attempt 最近成功交付的引导；没有引导时选择发布的初始题音。失败后可使用 `TECHNICAL_RETRY` 的 `retry_of_id` 指向原始重播并复用其音频。Session 状态提供当前目标、可用性、活动重播及从完整交付事实推导的 `replay_count`；首次交付、失败及技术重试不会单独增加计数。
 
+Speaking 的最低累计录音时长是数据库中的当前运行政策，初始未配置。教师管理凭据可通过 `PUT /teacher/assessment/speaking-policy` 设置正数 `minimum_duration_seconds`，通过同一路径的 GET 查询；施测 Session 凭据不能修改该政策。政策变更立即影响未提交 Attempt，不改变已接受的 Submission。Session 状态返回当前门槛、累计时长、资格及原因；符合条件只开放 `FINISH_SPEAKING`，不会自动提交。儿童显式调用 `POST /assessment/sessions/{session_id}/tasks/{task_id}/submissions/speaking`，传入 `attempt_id` 和稳定 `finish_request_id`；成功后重传相同身份可恢复 Submission。`speaking-input-v1` 清单固定有序录音及 ASR 身份、已交付求助、有效重播、实际政策值和版本；评分适配器须消费该清单，正式 Speaking 评价适配器仍待后续实现。
+
 ## 结算扫描入口
 
 `app.scoring.worker.run_settlement_once(engine, registry=registry, batch_size=100)` 推进数据库中有 `SettlementIntent` 和 `CloseManifest` 且状态为 `INPUT_CLOSED` 的 Session。`batch_size` 是单次查询的分页大小：每轮依次遍历符合条件的场次，逐场使用独立的 `READ COMMITTED` 事务；等待中的场次不会永久占住分页，已锁定场次留待下一轮。返回值包含 `completed`、`pending`、`skipped_locked` 和 `failures`；调用方须检查失败项。失败项包括 Session 身份、异常类型和代码位置，不包含可能敏感的异常内容。历史复核策略不能解释时，`pending` 中提供策略诊断，其他场次仍继续处理。
