@@ -7,7 +7,9 @@ not from the result returned by the adapter.
 SCHEMA = "speaking-asr-result-v1"
 
 
-def valid_consumption(source, consumption, requirement, upstream, payload):
+def valid_consumption(
+    source, consumption, requirement, upstream, payload, *, original_audio_type=None
+):
     """Validate an ordered subset of source segments and its exact audio inputs."""
     try:
         ids = consumption["segment_ids"]
@@ -53,6 +55,11 @@ def valid_consumption(source, consumption, requirement, upstream, payload):
                 or item["processing_version"] != params["processing_version"]
                 or not (
                     all(item[k] == segment[k] for k in ("sha256", "storage_ref", "media_type"))
+                    or (
+                        original_audio_type is not None
+                        and item["media_type"] == original_audio_type
+                        and all(item[k] == segment[k] for k in ("sha256", "storage_ref"))
+                    )
                     or any(
                         all(
                             record.get(k) == item[k]
@@ -68,12 +75,21 @@ def valid_consumption(source, consumption, requirement, upstream, payload):
         return False
 
 
-def recognition_result(payload, requirement, source, consumption, provider, model):
+def recognition_result(
+    payload, requirement, source, consumption, provider, model, *, original_audio_type=None
+):
     """Validate every covered result, retaining its ordered source identities."""
     try:
         params = requirement["parameters"]
         if (
-            not valid_consumption(source, consumption, requirement, None, None)
+            not valid_consumption(
+                source,
+                consumption,
+                requirement,
+                None,
+                None,
+                original_audio_type=original_audio_type,
+            )
             or not isinstance(provider, str)
             or not provider
             or not isinstance(model, str)
