@@ -59,6 +59,10 @@ class EvaluationJob(Base):
             "input_refs IS NULL OR jsonb_typeof(input_refs) = 'object'",
             name="ck_evaluation_job_input_refs",
         ),
+        CheckConstraint(
+            "execution_snapshot IS NULL OR jsonb_typeof(execution_snapshot) = 'object'",
+            name="ck_evaluation_job_execution_snapshot",
+        ),
         Index(
             "ix_evaluation_jobs_waiting",
             "last_checked_at",
@@ -85,6 +89,7 @@ class EvaluationJob(Base):
     last_checked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    execution_snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     dispatch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -108,6 +113,10 @@ class RawEvaluation(Base):
             name="ck_raw_evaluation_payload",
         ),
         CheckConstraint("jsonb_typeof(input_refs) = 'object'", name="ck_raw_evaluation_refs"),
+        CheckConstraint(
+            "execution_snapshot IS NULL OR jsonb_typeof(execution_snapshot) = 'object'",
+            name="ck_raw_evaluation_execution_snapshot",
+        ),
         Index(
             "uq_raw_evaluation_ready_job",
             "job_id",
@@ -122,6 +131,7 @@ class RawEvaluation(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     input_refs: Mapped[dict] = mapped_column(JSONB, nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     provider: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(Text)
     engine_version: Mapped[str | None] = mapped_column(Text)

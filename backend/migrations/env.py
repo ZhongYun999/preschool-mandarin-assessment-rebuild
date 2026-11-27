@@ -2,7 +2,10 @@ from alembic import context
 
 from app.database import Base, create_database_engine
 from app.evaluation import models as evaluation_models  # noqa: F401
-from app.evaluation import speaking_asr_models  # noqa: F401
+from app.evaluation import (
+    provider_models,  # noqa: F401
+    speaking_asr_models,  # noqa: F401
+)
 from app.media import fixed_audio, recording, tts_attempt  # noqa: F401
 from app.papers import paper  # noqa: F401
 from app.scoring import models as scoring_models  # noqa: F401

@@ -5,11 +5,13 @@ from app.api.assessment_repetition import router as repetition_router
 from app.api.assessment_session import router as assessment_router
 from app.api.teacher_api import router as teacher_router
 from app.api.teacher_assessment import router as teacher_assessment_router
+from app.api.teacher_llm_provider import router as teacher_llm_provider_router
 from app.api.teacher_review import router as teacher_review_router
 from app.api.teacher_scoring import router as teacher_scoring_router
 
 app = FastAPI(title="VNext Assessment API")
 app.include_router(teacher_router)
+app.include_router(teacher_llm_provider_router)
 app.include_router(teacher_scoring_router)
 app.include_router(teacher_review_router)
 app.include_router(teacher_assessment_router)

@@ -290,7 +290,7 @@ def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0024_formal_speaking_asr"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0025_llm_provider_config"
         assert (
             c.scalar(
                 text("SELECT storage_ref FROM fixed_audio_requests WHERE audio_id=:id"),
@@ -333,5 +333,5 @@ def test_downgrade_refuses_copied_draft_audio_without_published_paper(db, bank):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0024_formal_speaking_asr"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0025_llm_provider_config"
         assert c.scalar(text("SELECT count(*) FROM fixed_audio_requests")) == 2

@@ -174,6 +174,11 @@ class Registry:
             or not self.supports(task_type, upstream)
         ):
             return False
+        if (req.get("source"), req.get("version")) == ("qa-text-evaluation", "1") and (
+            ref["source"],
+            ref["version"],
+        ) != (QWEN_ASR_SOURCE, QWEN_ASR_VERSION):
+            return False
         contract = self._contracts.get((ref["source"], ref["version"]))
         return contract is not None and (
             callable(contract.recognition_result)
@@ -295,9 +300,27 @@ SPEAKING_TEXT_CONTRACTS = [
     )
     for source in (QWEN_SOURCE, DEEPSEEK_SOURCE)
 ]
+
+
+def _qa_formal_parameters(params):
+    from app.evaluation.qa_formal_text_contract import valid_parameters
+
+    return valid_parameters(params)
+
+
+QA_FORMAL_TEXT_CONTRACT = EvaluationContract(
+    "qa-text-evaluation",
+    "1",
+    frozenset({"qa"}),
+    _qa_formal_parameters,
+    lambda payload: payload["evaluation"]["review_recommended"],
+    accepts_no_text=False,
+)
+
 PRODUCTION_REGISTRY = Registry(
     contracts=[
         QWEN_ASR_CONTRACT,
+        QA_FORMAL_TEXT_CONTRACT,
         SPEAKING_QWEN_ASR_CONTRACT,
         *SPEAKING_TEXT_CONTRACTS,
         EvaluationContract(

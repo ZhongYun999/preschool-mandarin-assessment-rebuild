@@ -236,7 +236,7 @@ def test_frozen_prompt_and_qualitative_grade(grade, monkeypatch):
         candidate.VERSION,
         candidate.PROMPT_VERSION,
     )
-    assert not PRODUCTION_REGISTRY.supports("qa", TEXT)
+    assert PRODUCTION_REGISTRY.supports("qa", TEXT)
     for phrase in (
         "简短而充分的回答可以完整",
         "不要求与参考答案逐字一致",
