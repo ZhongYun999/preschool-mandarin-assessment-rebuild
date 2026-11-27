@@ -13,6 +13,17 @@ from app.evaluation.speaking_qwen_contract import SOURCE as SPEAKING_QWEN_SOURCE
 from app.evaluation.speaking_qwen_contract import VERSION as SPEAKING_QWEN_VERSION
 from app.evaluation.speaking_qwen_contract import valid_full_consumption, valid_parameters
 from app.evaluation.speaking_qwen_contract import validate_result as speaking_qwen_result
+from app.evaluation.speaking_text_execution_contract import DEEPSEEK_SOURCE, QWEN_SOURCE
+from app.evaluation.speaking_text_execution_contract import VERSION as SPEAKING_TEXT_VERSION
+from app.evaluation.speaking_text_execution_contract import (
+    review_recommendation as speaking_text_review,
+)
+from app.evaluation.speaking_text_execution_contract import (
+    supports_source as speaking_text_supports_source,
+)
+from app.evaluation.speaking_text_execution_contract import (
+    valid_consumption as speaking_text_consumption,
+)
 
 
 class ScoringUnavailable(ValueError):
@@ -268,4 +279,18 @@ SPEAKING_QWEN_ASR_CONTRACT = EvaluationContract(
     speaking_consumption_validator=valid_full_consumption,
     speaking_recognition_result=speaking_qwen_result,
 )
-PRODUCTION_REGISTRY = Registry(contracts=[QWEN_ASR_CONTRACT, SPEAKING_QWEN_ASR_CONTRACT])
+SPEAKING_TEXT_CONTRACTS = [
+    EvaluationContract(
+        source,
+        SPEAKING_TEXT_VERSION,
+        frozenset({"speaking"}),
+        lambda params, source=source: speaking_text_supports_source(params, source),
+        speaking_text_review,
+        accepts_no_text=True,
+        speaking_consumption_validator=speaking_text_consumption,
+    )
+    for source in (QWEN_SOURCE, DEEPSEEK_SOURCE)
+]
+PRODUCTION_REGISTRY = Registry(
+    contracts=[QWEN_ASR_CONTRACT, SPEAKING_QWEN_ASR_CONTRACT, *SPEAKING_TEXT_CONTRACTS]
+)
