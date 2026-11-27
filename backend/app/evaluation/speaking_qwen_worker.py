@@ -8,7 +8,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.evaluation.identity import InputIdentityConflict
+from app.evaluation.identity import canonical_json as _json
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.source_identity import speaking_source
 from app.evaluation.speaking_asr_contract import SCHEMA
 from app.evaluation.speaking_asr_models import SpeakingFormalASRAttempt, SpeakingFormalASROperation
 from app.evaluation.speaking_qwen_adapter import MAX_DATA_URI_BYTES, MAX_SECONDS, encoded_size
@@ -20,12 +23,9 @@ from app.evaluation.speaking_qwen_contract import (
     validate_result,
 )
 from app.evaluation.worker import (
-    InputIdentityConflict,
     KnownFailure,
-    _json,
     _lock_job_context,
     _skip,
-    speaking_source,
 )
 from app.media.audio_inspection import AudioError
 from app.media.audio_normalization import AudioSpec, prepare_audio

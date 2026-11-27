@@ -10,6 +10,8 @@ from datetime import timedelta
 
 from sqlalchemy.orm import Session
 
+from app.evaluation.identity import InputIdentityConflict
+from app.evaluation.source_identity import speaking_source
 from app.evaluation.speaking_acoustic_contract import (
     ALGORITHM,
     SCHEMA,
@@ -19,14 +21,12 @@ from app.evaluation.speaking_acoustic_contract import (
 )
 from app.evaluation.worker import (
     AdapterResult,
-    InputIdentityConflict,
     InputSnapshot,
     KnownFailure,
     _lock_job_context,
     _skip,
     claim_job,
     execute_claim,
-    speaking_source,
 )
 from app.media.audio_inspection import AudioError
 from app.media.audio_normalization import AudioSpec, prepare_audio

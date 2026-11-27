@@ -13,17 +13,17 @@ from test_teacher_api import AUTH
 
 from app.api.assessment_repetition import get_recording_store
 from app.api.teacher_review import get_scoring_registry
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.source_identity import speaking_source
 from app.evaluation.worker import (
     AdapterResult,
-    InputIdentityConflict,
     InputSnapshot,
     authorize_retry,
     claim_job,
     execute_claim,
     run_once,
     schedule,
-    speaking_source,
 )
 from app.main import app
 from app.papers.paper import PaperEntry
@@ -151,8 +151,9 @@ def test_full_source_anchors_all_segments_and_subset_consumption(
     db, client, flow, monkeypatch, count
 ):
     import hashlib
+    import json
 
-    from app.evaluation.worker import _json
+    from app.evaluation.identity import canonical_json as _json
 
     _, _, _, _, sid, registry, store, ids = make_case(db, client, flow, monkeypatch, count)
     adapter = OfflineAdapter()
@@ -161,7 +162,41 @@ def test_full_source_anchors_all_segments_and_subset_consumption(
     with Session(db) as session:
         job = session.get(EvaluationJob, ids[0])
         source = job.input_refs["speaking_source"]
-        frozen = session.get(Submission, sid).inputs["segments"]
+        submission = session.get(Submission, sid)
+        frozen = submission.inputs["segments"]
+        expected_source = {
+            "schema": "speaking-source-v1",
+            "submission_id": str(sid),
+            "attempt_id": str(submission.attempt_id),
+            "paper_entry_id": submission.inputs["paper_entry_id"],
+            "task_revision_id": submission.inputs["task_revision_id"],
+            "submission_schema": "speaking-input-v1",
+            "segments": [
+                {
+                    key: item[key]
+                    for key in (
+                        "segment_id",
+                        "recording_id",
+                        "position",
+                        "storage_ref",
+                        "sha256",
+                        "media_type",
+                    )
+                }
+                for item in frozen
+            ],
+        }
+
+        def digest(value):
+            data = json.dumps(
+                value, allow_nan=False, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            return hashlib.sha256(data.encode()).hexdigest()
+
+        assert source == {**expected_source, "sha256": digest(expected_source)}
+        assert job.input_fingerprint == digest(
+            {"refs": job.input_refs, "payload": work.inputs.payload, "requirement": job.requirement}
+        )
         assert [x["segment_id"] for x in source["segments"]] == [x["segment_id"] for x in frozen]
         assert len(source["segments"]) == count and len(source["sha256"]) == 64
         assert [x["sha256"] for x in source["segments"]] == [x["sha256"] for x in frozen]

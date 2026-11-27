@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from test_speaking_evaluation_input import make_case
 
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.speaking_acoustic import measure, prepare_adapter, run_job
 from app.evaluation.speaking_acoustic_contract import (
@@ -23,7 +24,6 @@ from app.evaluation.speaking_acoustic_contract import (
     valid_parameters,
 )
 from app.evaluation.worker import (
-    InputIdentityConflict,
     KnownFailure,
     claim_job,
     execute_claim,

@@ -10,6 +10,7 @@ from test_speaking_evaluation_input import OfflineAdapter, claim, make_case, val
 from test_speaking_process_asr import REQUIREMENT, FakeASR, segment
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.source_identity import speaking_source
 from app.evaluation.speaking_asr_contract import SCHEMA, recognition_result
 from app.evaluation.speaking_asr_contract import valid_consumption as asr_consumption
 from app.evaluation.worker import (
@@ -19,7 +20,6 @@ from app.evaluation.worker import (
     authorize_retry,
     execute_claim,
     schedule,
-    speaking_source,
 )
 from app.papers.paper import PaperEntry
 from app.scoring.registry import EvaluationContract
