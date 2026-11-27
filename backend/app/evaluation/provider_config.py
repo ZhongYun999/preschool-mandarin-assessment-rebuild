@@ -35,6 +35,21 @@ def _key(credential):
         if (
             (data["id"], data["provider"], data["version"])
             != (str(credential.credential_id), credential.provider, credential.version)
+            or (
+                credential.provider == "dashscope"
+                and (
+                    credential.region is None
+                    or "region" not in data
+                    or data["region"] != credential.region
+                )
+            )
+            or (
+                credential.provider == "deepseek"
+                and (
+                    credential.region is not None
+                    or ("region" in data and data["region"] is not None)
+                )
+            )
             or not isinstance(data["key"], str)
             or not data["key"].strip()
         ):
@@ -88,13 +103,20 @@ def save(
         ) + 1
         identity = uuid4()
         value = json.dumps(
-            {"id": str(identity), "provider": provider, "version": version, "key": api_key},
+            {
+                "id": str(identity),
+                "provider": provider,
+                "version": version,
+                "region": region,
+                "key": api_key,
+            },
             separators=(",", ":"),
         ).encode()
         credential = ProviderCredential(
             credential_id=identity,
             provider=provider,
             version=version,
+            region=region,
             ciphertext=_cipher().encrypt(value),
             enabled=True,
         )
@@ -103,7 +125,7 @@ def save(
         session.add(ProviderAudit(action="CREATE_CREDENTIAL", credential_id=identity))
     else:
         credential = session.get(ProviderCredential, UUID(str(credential_id)))
-        if credential is None or credential.provider != provider:
+        if credential is None or credential.provider != provider or credential.region != region:
             raise CredentialUnavailable("Credential unavailable")
         _key(credential)
     revision = (session.scalar(select(func.max(ProviderConfig.revision))) or 0) + 1
@@ -150,6 +172,10 @@ def resolve(session: Session):
     ):
         raise CredentialUnavailable("Provider configuration unavailable")
     credential = session.get(ProviderCredential, config.credential_id)
-    if credential is None or credential.provider != config.provider:
+    if (
+        credential is None
+        or credential.provider != config.provider
+        or credential.region != config.region
+    ):
         raise CredentialUnavailable("Credential unavailable")
     return config, credential, _key(credential)

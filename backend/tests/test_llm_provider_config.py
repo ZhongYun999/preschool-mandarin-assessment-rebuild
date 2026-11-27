@@ -578,3 +578,123 @@ def test_database_preserves_credential_and_config_history(db, master):
                 text("DELETE FROM llm_provider_configs WHERE config_id=:id"), {"id": config_id}
             )
         c.rollback()
+
+
+def test_claim_executes_original_provider_after_switch_then_retry(db, qa_formal, monkeypatch):
+    import socket
+
+    import dashscope
+    import httpx
+    from cryptography.fernet import Fernet
+    from test_asr_dependency import claim
+    from test_qa_formal_text_contract import RESULT
+
+    from app.evaluation import qa_formal_text_contract as business
+    from app.evaluation.models import EvaluationJob, RawEvaluation
+    from app.evaluation.qa_text_providers import DynamicQAText
+    from app.evaluation.worker import authorize_retry, execute_claim
+
+    def block_network(*args, **kwargs):
+        raise AssertionError("Unexpected network access in offline provider test")
+
+    monkeypatch.setattr(socket.socket, "connect", block_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", block_network)
+    monkeypatch.setenv("VNEXT_LLM_PROVIDER_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    f, _, _, sources = qa_formal()
+    calls = []
+
+    def deep_handler(request):
+        calls.append(("deepseek", str(request.url), json.loads(request.content)))
+        raise httpx.ReadTimeout("simulated timeout", request=request)
+
+    def qwen_handler(request):
+        calls.append(("qwen", str(request.url), json.loads(request.content)))
+        choice = {
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": json.dumps(RESULT)},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "request_id": "mock-request",
+                "model": "qwen-plus",
+                "output": {"choices": [choice]},
+            },
+        )
+
+    def deep_factory(**kwargs):
+        return httpx.Client(transport=httpx.MockTransport(deep_handler), **kwargs)
+
+    def qwen_factory(**kwargs):
+        return dashscope.Client(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(qwen_handler))
+        )
+
+    sources[(business.SOURCE, business.VERSION)] = DynamicQAText(
+        client_factories={"deepseek": deep_factory, "dashscope": qwen_factory}
+    )
+    with Session(db) as s, s.begin():
+        old_config = service.save(
+            s, provider="deepseek", model="deepseek-flash", api_key="synthetic-old-key"
+        )
+        old_revision = old_config.revision
+    assert execute_claim(db, claim(db, f, "dashscope-qwen3-asr", sources))
+    old = claim(db, f, business.SOURCE, sources)
+    with Session(db) as s:
+        job = s.get(EvaluationJob, old.job_id)
+        fingerprint, old_snapshot = job.input_fingerprint, dict(job.execution_snapshot)
+        assert old_snapshot["config_revision"] == old_revision
+    with Session(db) as s, s.begin():
+        new_config = service.save(
+            s,
+            provider="dashscope",
+            model="qwen-plus",
+            region="cn-beijing",
+            workspace="offline-test",
+            api_key="synthetic-new-key",
+        )
+        new_revision = new_config.revision
+    assert execute_claim(db, old)
+    with Session(db) as s, s.begin():
+        job = s.get(EvaluationJob, old.job_id)
+        raw = s.scalar(
+            select(RawEvaluation).where(
+                RawEvaluation.job_id == old.job_id, RawEvaluation.status == "UNKNOWN"
+            )
+        )
+        assert (
+            job.status == "UNKNOWN"
+            and raw.execution_snapshot == job.execution_snapshot == old_snapshot
+        )
+        assert raw.input_fingerprint == job.input_fingerprint == fingerprint
+        assert "synthetic-old-key" not in json.dumps(raw.execution_snapshot)
+        authorize_retry(s, old.job_id, accept_unknown=True)
+    retry = claim(db, f, business.SOURCE, sources)
+    assert retry.adapter.snapshot["provider"] == "dashscope"
+    assert retry.adapter.snapshot["config_revision"] == new_revision
+    assert execute_claim(db, retry)
+    with Session(db) as s:
+        job = s.get(EvaluationJob, old.job_id)
+        rows = list(s.scalars(select(RawEvaluation).where(RawEvaluation.job_id == old.job_id)))
+        by_status = {row.status: row for row in rows}
+        assert set(by_status) == {"UNKNOWN", "READY"}
+        assert by_status["UNKNOWN"].execution_snapshot == old_snapshot
+        assert (
+            by_status["READY"].execution_snapshot
+            == job.execution_snapshot
+            == retry.adapter.snapshot
+        )
+        assert by_status["READY"].payload["evaluation"] == RESULT
+        assert all(row.input_fingerprint == fingerprint for row in rows)
+        assert "synthetic-new-key" not in json.dumps(by_status["READY"].execution_snapshot)
+    assert [item[0] for item in calls] == ["deepseek", "qwen"]
+    assert calls[0][1] == "https://api.deepseek.com/chat/completions"
+    assert calls[0][2]["model"] == "deepseek-flash"
+    assert calls[0][2]["messages"][0]["content"] == business.PROMPT
+    assert calls[1][1].startswith("https://offline-test.cn-beijing.maas.aliyuncs.com/")
+    assert calls[1][2]["model"] == "qwen-plus"
+    assert calls[1][2]["input"]["messages"][0]["content"] == business.PROMPT
+    assert (
+        json.loads(calls[0][2]["messages"][1]["content"])["asr_text"]
+        == json.loads(calls[1][2]["input"]["messages"][1]["content"])["asr_text"]
+    )

@@ -53,7 +53,10 @@ def _project(session, config):
     credential = session.get(ProviderCredential, config.credential_id)
     try:
         available = bool(
-            credential and credential.provider == config.provider and service._key(credential)
+            credential
+            and credential.provider == config.provider
+            and credential.region == config.region
+            and service._key(credential)
         )
     except service.CredentialUnavailable:
         available = False
@@ -111,6 +114,7 @@ def get_credentials(session: Session = db_dependency):
             {
                 "credential_id": str(row.credential_id),
                 "provider": row.provider,
+                "region": row.region,
                 "version": row.version,
                 "enabled": row.enabled,
                 "available": available,

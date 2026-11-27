@@ -29,10 +29,14 @@ class ProviderCredential(Base):
         UniqueConstraint("credential_id", "provider", name="uq_llm_credential_identity_provider"),
         CheckConstraint("provider IN ('dashscope','deepseek')", name="ck_llm_credential_provider"),
         CheckConstraint("version > 0", name="ck_llm_credential_version"),
+        CheckConstraint(
+            "provider <> 'deepseek' OR region IS NULL", name="ck_llm_credential_region"
+        ),
     )
     credential_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+    region: Mapped[str | None] = mapped_column(Text)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
