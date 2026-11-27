@@ -18,16 +18,16 @@ from test_teacher_api import AUTH
 from app.api.assessment_repetition import get_recording_store
 from app.api.teacher_api import get_audio_store
 from app.api.teacher_review import get_scoring_registry
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.source_identity import recording_input
 from app.evaluation.worker import (
     AdapterResult,
-    InputIdentityConflict,
     InputSnapshot,
     KnownFailure,
     authorize_retry,
     claim_job,
     execute_claim,
-    recording_input,
     run_once,
     schedule,
 )

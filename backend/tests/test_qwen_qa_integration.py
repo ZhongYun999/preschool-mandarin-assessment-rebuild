@@ -18,11 +18,11 @@ from app.evaluation.asr_contract import MODEL as ASR_MODEL
 from app.evaluation.asr_contract import SOURCE as ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as ASR_VERSION
 from app.evaluation.dashscope_asr import DashScopeASR
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.qa_text_contract import SOURCE, VERSION, valid_parameters
 from app.evaluation.qwen_qa_text import QwenQAText
 from app.evaluation.worker import (
-    InputIdentityConflict,
     authorize_retry,
     claim_job,
     execute_claim,

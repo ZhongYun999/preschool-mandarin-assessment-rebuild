@@ -11,7 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.evaluation.models import EvaluationJob, RawEvaluation
-from app.evaluation.worker import _upstream_asr, speaking_source, valid_speaking_consumption
+from app.evaluation.source_identity import speaking_source, valid_speaking_consumption
+from app.evaluation.upstream_evidence import upstream_asr
 from app.papers.paper import EvaluationPlan, Paper, PaperEntry
 from app.scoring.models import (
     AutomaticPaperScore,
@@ -89,7 +90,7 @@ def _evidence(db, submission, entry, revision, plan, registry):
         if "depends_on" in requirement:
             if not registry.valid_dependency(revision.task_type, plan.requirements, index):
                 raise ScoringUnavailable("Frozen evaluation dependency is unavailable")
-            upstream = _upstream_asr(db, job, submission, revision, plan, registry, source)
+            upstream = upstream_asr(db, job, submission, revision, plan, registry, source)
             dependencies = refs.get("dependencies")
             if (
                 upstream is None

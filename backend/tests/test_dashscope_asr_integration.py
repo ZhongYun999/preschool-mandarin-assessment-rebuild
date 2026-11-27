@@ -17,9 +17,9 @@ from test_dashscope_asr import body
 
 from app.evaluation.asr_contract import MODEL, SOURCE, VERSION
 from app.evaluation.dashscope_asr import DashScopeASR
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.worker import (
-    InputIdentityConflict,
     claim_job,
     execute_claim,
     recover_expired,

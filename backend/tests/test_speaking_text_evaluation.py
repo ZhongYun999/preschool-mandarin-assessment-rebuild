@@ -13,6 +13,7 @@ from test_speaking_evaluation_input import claim, make_case
 from test_speaking_formal_asr import ASR, CONTRACTS, MultiASR
 from test_speaking_process_asr import REQUIREMENT, FakeASR, segment
 
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.speaking_text_contract import (
     BANDS,
@@ -30,7 +31,6 @@ from app.evaluation.speaking_text_contract import (
 )
 from app.evaluation.worker import (
     AdapterResult,
-    InputIdentityConflict,
     KnownFailure,
     authorize_retry,
     execute_claim,

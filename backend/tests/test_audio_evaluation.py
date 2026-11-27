@@ -8,14 +8,14 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from test_asr_dependency import adapters, claim
 
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.source_identity import recording_input
 from app.evaluation.worker import (
     AdapterResult,
-    InputIdentityConflict,
     InputSnapshot,
     KnownFailure,
     claim_job,
-    recording_input,
     recover_expired,
     run_once,
 )
