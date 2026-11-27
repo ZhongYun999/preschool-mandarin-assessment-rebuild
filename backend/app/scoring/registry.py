@@ -9,6 +9,10 @@ from app.evaluation.asr_contract import SOURCE as QWEN_ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as QWEN_ASR_VERSION
 from app.evaluation.asr_contract import recognition_result as qwen_asr_recognition_result
 from app.evaluation.asr_contract import valid_parameters as valid_qwen_asr_parameters
+from app.evaluation.speaking_acoustic_contract import SOURCE as ACOUSTIC_SOURCE
+from app.evaluation.speaking_acoustic_contract import VERSION as ACOUSTIC_VERSION
+from app.evaluation.speaking_acoustic_contract import valid_consumption as acoustic_consumption
+from app.evaluation.speaking_acoustic_contract import valid_parameters as acoustic_parameters
 from app.evaluation.speaking_qwen_contract import SOURCE as SPEAKING_QWEN_SOURCE
 from app.evaluation.speaking_qwen_contract import VERSION as SPEAKING_QWEN_VERSION
 from app.evaluation.speaking_qwen_contract import valid_full_consumption, valid_parameters
@@ -292,5 +296,16 @@ SPEAKING_TEXT_CONTRACTS = [
     for source in (QWEN_SOURCE, DEEPSEEK_SOURCE)
 ]
 PRODUCTION_REGISTRY = Registry(
-    contracts=[QWEN_ASR_CONTRACT, SPEAKING_QWEN_ASR_CONTRACT, *SPEAKING_TEXT_CONTRACTS]
+    contracts=[
+        QWEN_ASR_CONTRACT,
+        SPEAKING_QWEN_ASR_CONTRACT,
+        *SPEAKING_TEXT_CONTRACTS,
+        EvaluationContract(
+            ACOUSTIC_SOURCE,
+            ACOUSTIC_VERSION,
+            frozenset({"speaking"}),
+            acoustic_parameters,
+            speaking_consumption_validator=acoustic_consumption,
+        ),
+    ]
 )
