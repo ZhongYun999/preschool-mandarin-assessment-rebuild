@@ -118,6 +118,7 @@ def test_management_api_reports_region_without_secrets(db, client, master):
     assert "fake-only-key" not in listing.text and "ciphertext" not in listing.text
 
 
+@pytest.mark.db_isolated
 def test_legacy_region_backfill_preserves_ciphertext_and_history(db, master):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     ids = [uuid4() for _ in range(4)]
@@ -231,6 +232,7 @@ def test_region_ciphertext_tampering_fails_closed(region, master):
         service._key(credential)
 
 
+@pytest.mark.db_isolated
 def test_upgrade_preserves_existing_evaluation_snapshot(db, qa_formal):
     from test_asr_dependency import claim
     from test_qa_formal_text_contract import FakeText

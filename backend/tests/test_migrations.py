@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,7 +6,6 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -19,12 +17,9 @@ from app.papers.paper import EvaluationPlan, copy_paper
 from app.papers.publication import publish
 
 
-def test_postgres_connection_and_migration_cycle(monkeypatch):
-    load_dotenv()
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        pytest.fail("TEST_DATABASE_URL must point to a disposable PostgreSQL test database")
-    monkeypatch.setenv("DATABASE_URL", url)
+@pytest.mark.db_isolated
+def test_postgres_connection_and_migration_cycle(monkeypatch, _test_database_url):
+    monkeypatch.setenv("DATABASE_URL", _test_database_url)
     engine = create_database_engine()
     schema = "test_" + uuid4().hex
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -69,6 +64,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
         engine.dispose()
 
 
+@pytest.mark.db_isolated
 def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as connection:
@@ -93,6 +89,7 @@ def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
         )
 
 
+@pytest.mark.db_isolated
 @pytest.mark.parametrize("scenario", ["published", "archived", "copied_draft", "published_empty"])
 def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
     paper_id, task, _, entry_id, _ = setup_paper(db, bank)

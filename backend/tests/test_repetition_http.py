@@ -463,6 +463,7 @@ def test_repetition_evaluation_and_formal_result(db, client, repetition, require
     assert client.get(f"/teacher/sessions/{f['sid']}/result", headers=AUTH).json()["ready"]
 
 
+@pytest.mark.db_isolated
 def test_database_recording_history_is_immutable(db, client, repetition):
     from pathlib import Path
 

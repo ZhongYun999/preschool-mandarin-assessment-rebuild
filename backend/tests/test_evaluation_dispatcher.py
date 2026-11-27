@@ -260,6 +260,7 @@ def test_undispatched_expired_claim_is_recovered_without_unknown(db, context):
     assert adapter.calls == 1
 
 
+@pytest.mark.db_isolated
 def test_downgrade_wont_discard_skipped_facts(db, context):
     _, job_id = prepare(db, context)
     with Session(db) as s, s.begin():
@@ -283,6 +284,7 @@ def test_downgrade_wont_discard_skipped_facts(db, context):
         )
 
 
+@pytest.mark.db_isolated
 def test_waiting_dependency_can_become_ready_from_persistent_fact(db, context):
     from app.evaluation.worker import InputSnapshot
 
@@ -466,6 +468,7 @@ def test_claim_first_redo_waits_then_pre_dispatch_rechecks(db, context):
     assert adapter.calls == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_legacy_running_job_is_conservatively_unknown(db, context):
     from uuid import uuid4
 
@@ -548,6 +551,7 @@ def test_unmaterialized_intent_cannot_be_marked_scheduled(db, context):
         assert s.scalar(select(func.count()).select_from(EvaluationJob)) == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_preserves_existing_ready_evidence_and_backfills_queue(db, context):
     from uuid import uuid4
 

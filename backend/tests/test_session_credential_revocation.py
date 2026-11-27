@@ -124,6 +124,7 @@ def test_listing_revocation_recovery_and_access_boundaries(db, client, setup_api
         )
 
 
+@pytest.mark.db_isolated
 def test_migration_existing_credentials_and_guard(db, client, setup_api):
     sid = client.post(
         "/teacher/assessment/sessions", headers=AUTH, json=create_body(setup_api["paper_id"])

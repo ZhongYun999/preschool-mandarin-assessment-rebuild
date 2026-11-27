@@ -353,6 +353,7 @@ def test_formal_finalization_rollback_preserves_review(db, ready_review):
         assert s.scalar(select(func.count()).select_from(ReviewedPaperScore)) == 1
 
 
+@pytest.mark.db_isolated
 def test_migration_preserves_old_automatic_final(db, two_tasks, tmp_path):
     from pathlib import Path
 

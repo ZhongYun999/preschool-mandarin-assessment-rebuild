@@ -381,6 +381,7 @@ def test_old_results_stay_with_original_submission_after_redo_and_close(db, cont
         assert s.get(Submission, old_submission).attempt_id == context["attempt_id"]
 
 
+@pytest.mark.db_isolated
 def test_downgrade_refuses_existing_evidence(db, context):
     _, job_id = prepare(db, context)
     assert execute_claim(db, claim(db, job_id, FakeAdapter()))

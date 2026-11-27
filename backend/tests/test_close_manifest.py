@@ -314,6 +314,7 @@ def test_concurrent_redo_and_close(db, context):
             assert s.scalar(select(func.count()).select_from(CloseManifest)) == 0
 
 
+@pytest.mark.db_isolated
 def test_downgrade_preserves_close(db, context):
     deliver(db, context)
     with Session(db) as s, s.begin():
@@ -396,6 +397,7 @@ def test_close_waits_for_authoritative_session_lock(db, context, first_action):
                 assert s.get(AssessmentSession, context["session_id"]).status == "IN_PROGRESS"
 
 
+@pytest.mark.db_isolated
 def test_upgrade_refuses_legacy_closed_session(db, context):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as c:
@@ -495,6 +497,7 @@ def test_unstarted_task_cannot_be_deleted_or_reassigned(db, two_tasks, tmp_path)
         assert s.get(Attempt, first).status == "ABANDONED"
 
 
+@pytest.mark.db_isolated
 def test_close_and_upgrade_reject_preexisting_missing_task(db, two_tasks, tmp_path):
     sid, rows = new_unstarted_session(db, two_tasks[0], tmp_path)
     missing_task, missing_entry = rows[0]

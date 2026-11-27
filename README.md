@@ -43,12 +43,12 @@ uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 
 ```powershell
 ruff check backend
-python -m pytest backend/tests
+python -m pytest backend/tests --durations=25
 python scripts/check_docs.py
 python -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-迁移测试在 `TEST_DATABASE_URL` 指定的数据库中建立随机临时 schema，测试完成后清理；未设置该变量会明确失败。新建迁移可用 `alembic -c backend/alembic.ini revision -m "说明"`，执行迁移使用上面的 `upgrade head`。迁移前应检查目标数据库。
+测试要求 `TEST_DATABASE_URL` 使用本机 PostgreSQL，数据库名以 `test_` 开头或以 `_test` 结尾；不接受 URL 查询参数或覆盖连接的 libpq 服务配置。普通测试共用随机 Schema，并在每项测试后清空业务数据；迁移及 Schema 变更测试使用 `@pytest.mark.db_isolated` 的独立 Schema。结束时释放连接并删除随机 Schema，不支持 pytest-xdist。新建迁移可用 `alembic -c backend/alembic.ini revision -m "说明"`，执行迁移使用上面的 `upgrade head`。迁移前应检查目标数据库。
 
 ## Excel 模板与预检
 
