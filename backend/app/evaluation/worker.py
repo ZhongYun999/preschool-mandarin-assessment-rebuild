@@ -808,7 +808,9 @@ def recover_expired(session: Session, *, limit: int | None = None) -> int:
         .execution_options(populate_existing=True)
     ).all()
     for job in jobs:
-        if job.dispatch_started_at is None:
+        if job.dispatch_started_at is None or (
+            job.requirement.get("source"), job.requirement.get("version")
+        ) == ("local-speaking-acoustic", "1"):
             job.status, job.error_code = "WAITING", None
             job.claim_token, job.lease_until = None, None
             continue
