@@ -326,7 +326,7 @@ def test_downgrade_preserves_close(db, context):
             command.downgrade(config, "0009_submission")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM close_manifests")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0024_formal_speaking_asr"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0026_llm_credential_region"
 
 
 @pytest.mark.parametrize("first_action", ["submit", "redo"])

@@ -319,6 +319,18 @@ def _claim_job(
         ):
             raise InputIdentityConflict("Evaluation inputs changed after first claim")
         now = s.scalar(select(func.clock_timestamp()))
+        prepare = getattr(adapter, "prepare_execution", None)
+        if prepare is not None:
+            from app.evaluation.provider_config import CredentialUnavailable
+
+            try:
+                job.execution_snapshot, adapter = prepare(s, now)
+            except CredentialUnavailable:
+                job.error_code = "LLM_PROVIDER_UNAVAILABLE"
+                s.flush()
+                return None
+        else:
+            job.execution_snapshot = None
         token = uuid4()
         job.input_refs, job.input_fingerprint = refs, digest
         job.claim_token, job.lease_until = token, now + lease
@@ -406,6 +418,7 @@ def _finish(
                 status=status,
                 input_refs=job.input_refs,
                 input_fingerprint=job.input_fingerprint,
+                execution_snapshot=job.execution_snapshot,
                 provider=result.provider if result else None,
                 model=result.model if result else None,
                 engine_version=result.engine_version if result else None,
@@ -477,6 +490,9 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
             or live.input_fingerprint != fingerprint
         ):
             raise ValueError("Claim does not match frozen input identity")
+        adapter_snapshot = getattr(claim.adapter, "snapshot", None)
+        if live.execution_snapshot != adapter_snapshot:
+            raise ValueError("Claim does not match execution snapshot")
         # The committed marker is the dispatch boundary. Redo after it may race
         # an external request; a crash is conservatively treated as UNKNOWN.
         live.dispatch_started_at = now
@@ -563,6 +579,7 @@ def recover_expired(session: Session, *, limit: int | None = None) -> int:
                 status="UNKNOWN",
                 input_refs=job.input_refs,
                 input_fingerprint=job.input_fingerprint,
+                execution_snapshot=job.execution_snapshot,
                 error_code="LEASE_EXPIRED_OUTCOME_UNKNOWN",
             )
         )
