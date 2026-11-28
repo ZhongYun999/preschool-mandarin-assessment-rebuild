@@ -66,29 +66,33 @@ auth_db = Depends(get_auth_db)
 
 
 def get_current_user(request: Request, db: Session = auth_db) -> Identity:
-    token = request.cookies.get(COOKIE_NAME)
-    if not token or len(token) > 256:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    row = db.execute(
-        select(User, AuthSession)
-        .join(AuthSession, AuthSession.user_id == User.user_id)
-        .where(
-            AuthSession.token_digest == token_digest(token),
-            AuthSession.expires_at > datetime.now(UTC),
-            User.is_active.is_(True),
+    try:
+        token = request.cookies.get(COOKIE_NAME)
+        if not token or len(token) > 256:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        row = db.execute(
+            select(User, AuthSession)
+            .join(AuthSession, AuthSession.user_id == User.user_id)
+            .where(
+                AuthSession.token_digest == token_digest(token),
+                AuthSession.expires_at > datetime.now(UTC),
+                User.is_active.is_(True),
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        user, auth_session = row
+        csrf = csrf_token(token)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            supplied = request.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(csrf.encode(), supplied.encode()):
+                raise HTTPException(status_code=403, detail="CSRF validation failed")
+        return Identity(
+            user.user_id, auth_session.session_id, user.username, user.display_name, user.role, csrf
         )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    user, auth_session = row
-    csrf = csrf_token(token)
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        supplied = request.headers.get("X-CSRF-Token", "")
-        if not hmac.compare_digest(csrf.encode(), supplied.encode()):
-            raise HTTPException(status_code=403, detail="CSRF validation failed")
-    return Identity(
-        user.user_id, auth_session.session_id, user.username, user.display_name, user.role, csrf
-    )
+    finally:
+        # Return the independent authentication connection before business work starts.
+        db.rollback()
 
 
 current_user_dependency = Depends(get_current_user)
