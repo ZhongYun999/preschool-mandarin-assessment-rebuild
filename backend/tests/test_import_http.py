@@ -6,6 +6,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from auth_helpers import AUTH, prepare_admin
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
@@ -13,16 +14,16 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from test_taskbank_import import commit, picture, xlsx
 
+from app.api.db import get_auth_db
 from app.api.teacher_api import get_db, get_image_store, get_preview_store, router
 from app.taskbank.image_store import ImageStore
 from app.taskbank.import_batch import ImportBatch
 from app.taskbank.models import Asset, TaskBank, TaskIdentity, TaskRevision
 from app.taskbank.preview_store import PreviewStore
 
-AUTH = {"Authorization": "Bearer test-token-only"}
-
 
 def make_app(db, images, previews):
+    prepare_admin(db)
     app = FastAPI()
     app.include_router(router)
 
@@ -31,6 +32,7 @@ def make_app(db, images, previews):
             yield session
 
     app.dependency_overrides[get_db] = session_override
+    app.dependency_overrides[get_auth_db] = session_override
     app.dependency_overrides[get_image_store] = lambda: ImageStore(images)
     app.dependency_overrides[get_preview_store] = lambda: PreviewStore(previews)
     return app
@@ -39,7 +41,6 @@ def make_app(db, images, previews):
 @pytest.fixture
 def setup(db, tmp_path, monkeypatch):
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token-only")
-    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
     images, previews = tmp_path / "images", tmp_path / "previews"
     app = make_app(db, images, previews)
     with TestClient(app) as client:
@@ -199,11 +200,12 @@ def test_auth_missing_configuration_and_bad_bank(setup, bank, monkeypatch):
     assert client.get(path).status_code == 401
     assert confirm(client, bank, preview_id, "x", {}).status_code == 401
     assert upload(client, bank, data, {"Authorization": "Bearer wrong"}).status_code == 401
-    monkeypatch.delenv("TEACHER_MANAGEMENT_TOKEN")
-    assert upload(client, bank, data).status_code == 503
-    assert client.get(path, headers=AUTH).status_code == 503
-    assert confirm(client, bank, preview_id, "x").status_code == 503
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token-only")
+    old_auth = {"Authorization": "Bearer test-token-only"}
+    assert upload(client, bank, data, old_auth).status_code == 401
+    assert client.get(path, headers=old_auth).status_code == 401
+    assert confirm(client, bank, preview_id, "x", old_auth).status_code == 401
+    assert client.get(path, headers=AUTH).status_code == 200
     assert upload(client, uuid4(), data).status_code == 404
 
 

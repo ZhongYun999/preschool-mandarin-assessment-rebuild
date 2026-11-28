@@ -426,6 +426,9 @@ def test_existing_sessions_survive_credential_migration(db, client, setup_api):
         connection.commit()
         command.upgrade(config, "head")
         connection.commit()
+    from auth_helpers import prepare_admin
+
+    prepare_admin(db)
     with Session(db) as s:
         assert s.get(AssessmentSession, UUID(sid)).status == "IN_PROGRESS"
     token = issue(client, sid)
@@ -499,3 +502,64 @@ def test_empty_paper_keeps_legal_close_action(db, client, bank, tmp_path):
     finally:
         app.dependency_overrides.pop(get_audio_store, None)
         app.dependency_overrides.pop(get_scoring_registry, None)
+
+
+def test_teacher_can_create_session_and_issue_credential(db, client, setup_api):
+    from datetime import UTC, datetime, timedelta
+
+    from app.api.teacher_auth import COOKIE_NAME, csrf_token, dummy_hash, token_digest
+    from app.auth.models import AuthSession, User
+
+    token = "test-teacher-session-token"
+    with Session(db) as session, session.begin():
+        user = User(
+            username="session-teacher",
+            display_name="Teacher",
+            password_hash=dummy_hash,
+            role="teacher",
+            is_active=True,
+        )
+        session.add(user)
+        session.flush()
+        user_id = user.user_id
+        session.add(
+            AuthSession(
+                user_id=user.user_id,
+                token_digest=token_digest(token),
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+    headers = {"Cookie": f"{COOKIE_NAME}={token}", "X-CSRF-Token": csrf_token(token)}
+    result = client.post(
+        "/teacher/assessment/sessions", headers=headers, json=create_body(setup_api["paper_id"])
+    )
+    assert result.status_code == 200
+    sid = result.json()["session_id"]
+    credential = client.post(f"/teacher/assessment/sessions/{sid}/access-token", headers=headers)
+    assert credential.status_code == 200
+    assert (
+        client.get(
+            f"/assessment/sessions/{sid}", headers=access(credential.json()["token"])
+        ).status_code
+        == 200
+    )
+    assert client.get("/teacher/assessment/speaking-policy", headers=headers).status_code == 403
+    assert (
+        client.put(
+            "/teacher/assessment/speaking-policy",
+            headers=headers,
+            json={"minimum_duration_seconds": 3.0},
+        ).status_code
+        == 403
+    )
+    assert client.post("/auth/logout", headers=headers).status_code == 204
+    assert (
+        client.patch(f"/admin/users/{user_id}", headers=AUTH, json={"is_active": False}).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            f"/assessment/sessions/{sid}", headers=access(credential.json()["token"])
+        ).status_code
+        == 200
+    )

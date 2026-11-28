@@ -72,6 +72,7 @@ class ProviderAudit(Base):
     __tablename__ = "llm_provider_audit"
     audit_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("auth_users.user_id"))
     config_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("llm_provider_configs.config_id")
     )

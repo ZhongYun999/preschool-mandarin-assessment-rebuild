@@ -109,6 +109,7 @@ class ReviewDecision(Base):
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     operation_id: Mapped[str] = mapped_column(Text, nullable=False)
     teacher_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("auth_users.user_id"))
     action: Mapped[str] = mapped_column(Text, nullable=False)
     override_value: Mapped[object | None] = mapped_column(JSONB(none_as_null=True))
     effective_result: Mapped[object | None] = mapped_column(JSONB(none_as_null=True))

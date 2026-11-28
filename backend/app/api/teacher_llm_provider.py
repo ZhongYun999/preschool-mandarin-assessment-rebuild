@@ -10,8 +10,9 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.auth import _confirm
 from app.api.teacher_api import get_db
-from app.api.teacher_auth import require_teacher
+from app.api.teacher_auth import Identity, require_admin
 from app.evaluation import provider_config as service
 from app.evaluation.provider_models import ProviderCredential
 
@@ -31,10 +32,11 @@ class _SecretSafeRoute(APIRoute):
 
 router = APIRouter(
     prefix="/teacher/llm-provider",
-    dependencies=[Depends(require_teacher)],
+    dependencies=[Depends(require_admin)],
     route_class=_SecretSafeRoute,
 )
 db_dependency = Depends(get_db)
+admin_dependency = Depends(require_admin)
 
 
 class ConfigRequest(BaseModel):
@@ -80,9 +82,12 @@ def get_config(session: Session = db_dependency):
 
 
 @router.put("")
-def save_config(body: ConfigRequest, session: Session = db_dependency):
+def save_config(
+    body: ConfigRequest, session: Session = db_dependency, actor: Identity = admin_dependency
+):
     try:
         with session.begin():
+            _confirm(session, actor, admin=True)
             config = service.save(
                 session,
                 provider=body.provider,
@@ -91,6 +96,7 @@ def save_config(body: ConfigRequest, session: Session = db_dependency):
                 workspace=body.workspace,
                 api_key=body.api_key.get_secret_value() if body.api_key else None,
                 credential_id=body.credential_id,
+                actor_user_id=actor.user_id,
             )
             return _project(session, config)
     except (ValueError, service.CredentialUnavailable):
@@ -124,10 +130,13 @@ def get_credentials(session: Session = db_dependency):
 
 
 @router.post("/credentials/{credential_id}/disable")
-def disable_credential(credential_id: UUID, session: Session = db_dependency):
+def disable_credential(
+    credential_id: UUID, session: Session = db_dependency, actor: Identity = admin_dependency
+):
     try:
         with session.begin():
-            service.disable(session, credential_id)
+            _confirm(session, actor, admin=True)
+            service.disable(session, credential_id, actor_user_id=actor.user_id)
     except service.CredentialUnavailable:
         raise HTTPException(status_code=404, detail="Credential unavailable") from None
     return {"disabled": True}

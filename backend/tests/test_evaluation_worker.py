@@ -392,7 +392,7 @@ def test_downgrade_refuses_existing_evidence(db, context):
             command.downgrade(config, "0011_session_task_identity")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM raw_evaluations")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0026_llm_credential_region"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0027_auth_users_sessions"
 
 
 def test_retry_rejects_changed_resolved_input_identity(db, context):

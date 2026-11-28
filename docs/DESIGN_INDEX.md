@@ -14,6 +14,7 @@
 
 | 范围 | 现行稿件 | 主要边界 |
 |---|---|---|
+| 教师身份与权限 | [AUTH-01](design/AUTH_01_TEACHER_IDENTITY.md) | 服务端登录会话、双角色与 CSRF |
 | 题库与 Excel | [T1.5](design/VNEXT_TASKBANK_VERSION_IMPORT_DESIGN_T1.5.md) | TaskIdentity/不可变 TaskRevision，15 列 Excel；选择题正确选项并入参考答案 |
 | 试卷与冻结 | [P1.1](design/VNEXT_PAPER_PUBLICATION_SCORING_DESIGN_P1.1.md) | 复制原样继承历史版本，发布后不可变 |
 | Speaking | [v1.1](design/VNEXT_SPEAKING_STATE_MACHINE_DESIGN_v1.1.md) | 求助、录音、提交与恢复 |

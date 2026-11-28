@@ -2,11 +2,13 @@ from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
+from auth_helpers import AUTH, prepare_admin
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 from test_taskbank_import import commit, picture, xlsx
 
+from app.api.db import get_auth_db
 from app.api.teacher_api import get_db, get_image_store
 from app.main import app
 from app.taskbank.image_store import ImageStore
@@ -15,14 +17,14 @@ from app.taskbank.models import RevisionContent, append_revision
 
 @pytest.fixture
 def client(db, tmp_path, monkeypatch):
-    monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "example-only-test-token")
-    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
+    prepare_admin(db)
 
     def session_override():
         with Session(db) as s:
             yield s
 
     app.dependency_overrides[get_db] = session_override
+    app.dependency_overrides[get_auth_db] = session_override
     app.dependency_overrides[get_image_store] = lambda: ImageStore(tmp_path)
     try:
         with TestClient(app) as c:
@@ -31,7 +33,6 @@ def client(db, tmp_path, monkeypatch):
         app.dependency_overrides.clear()
 
 
-AUTH = {"Authorization": "Bearer example-only-test-token"}
 
 
 def make_bank(client, name="题库", description="说明"):
@@ -63,8 +64,8 @@ def test_all_teacher_routes_require_token_and_unconfigured_fails_closed(client, 
             client.request(method, url, headers={"Authorization": "Bearer wrong"}).status_code
             == 401
         )
-    monkeypatch.delenv("TEACHER_MANAGEMENT_TOKEN")
-    assert client.get("/teacher/banks", headers=AUTH).status_code == 503
+    monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "example-only-test-token")
+    assert client.get("/teacher/banks", headers={"Authorization": "Bearer example-only-test-token"}).status_code == 401
     assert client.get("/health").json() == {"status": "ok"}
     assert "example-only-test-token" not in client.get("/health").text
 

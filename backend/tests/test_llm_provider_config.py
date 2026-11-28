@@ -226,6 +226,7 @@ def test_provider_mock_persists_identical_business_result(db, qa_formal, monkeyp
 
 
 def test_management_api_auth_and_secret_redaction(db, client, master, caplog):
+    from auth_helpers import USER_ID
     from test_teacher_api import AUTH
 
     path = "/teacher/llm-provider"
@@ -253,6 +254,8 @@ def test_management_api_auth_and_secret_redaction(db, client, master, caplog):
         client.post(path + f"/credentials/{credential_id}/disable", headers=AUTH).status_code == 200
     )
     assert client.get(path, headers=AUTH).json()["available"] is False
+    with Session(db) as s:
+        assert {row.actor_user_id for row in s.scalars(select(ProviderAudit))} == {USER_ID}
 
 
 @pytest.mark.parametrize("provider", ["dashscope", "deepseek"])
@@ -698,3 +701,26 @@ def test_claim_executes_original_provider_after_switch_then_retry(db, qa_formal,
         json.loads(calls[0][2]["messages"][1]["content"])["asr_text"]
         == json.loads(calls[1][2]["input"]["messages"][1]["content"])["asr_text"]
     )
+
+
+@pytest.mark.db_isolated
+def test_downgrade_refuses_to_discard_provider_actor(db, client, master):
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.exc import DBAPIError
+    from test_teacher_api import AUTH
+
+    response = client.put(
+        "/teacher/llm-provider",
+        headers=AUTH,
+        json={"provider": "deepseek", "model": "deepseek-flash", "api_key": "fixture-key"},
+    )
+    assert response.status_code == 200
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    with db.connect() as connection:
+        config.attributes["connection"] = connection
+        with pytest.raises(DBAPIError, match="cannot discard authenticated audit identity"):
+            command.downgrade(config, "0026_llm_credential_region")
+        connection.rollback()

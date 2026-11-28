@@ -84,6 +84,7 @@ def save(
     workspace=None,
     api_key=None,
     credential_id=None,
+    actor_user_id=None,
 ):
     if not valid_config(provider, model, region, workspace):
         raise ValueError("Invalid provider configuration")
@@ -122,7 +123,11 @@ def save(
         )
         session.add(credential)
         session.flush()
-        session.add(ProviderAudit(action="CREATE_CREDENTIAL", credential_id=identity))
+        session.add(
+            ProviderAudit(
+                action="CREATE_CREDENTIAL", credential_id=identity, actor_user_id=actor_user_id
+            )
+        )
     else:
         credential = session.get(ProviderCredential, UUID(str(credential_id)))
         if credential is None or credential.provider != provider or credential.region != region:
@@ -145,18 +150,23 @@ def save(
             action="ACTIVATE_CONFIG",
             config_id=config.config_id,
             credential_id=credential.credential_id,
+            actor_user_id=actor_user_id,
         )
     )
     return config
 
 
-def disable(session: Session, credential_id):
+def disable(session: Session, credential_id, *, actor_user_id=None):
     _lock(session)
     credential = session.get(ProviderCredential, credential_id)
     if credential is None or not credential.enabled:
         raise CredentialUnavailable("Credential unavailable")
     credential.enabled = False
-    session.add(ProviderAudit(action="DISABLE_CREDENTIAL", credential_id=credential_id))
+    session.add(
+        ProviderAudit(
+            action="DISABLE_CREDENTIAL", credential_id=credential_id, actor_user_id=actor_user_id
+        )
+    )
 
 
 def current(session: Session):

@@ -1,5 +1,7 @@
 # QA-EVAL-01B 全局文本评价服务商配置
 
+> 历史阶段记录：本文所述临时共享教师凭据已由 [AUTH-01](../design/AUTH_01_TEACHER_IDENTITY.md) 正式登录与管理员权限替代。
+
 管理员使用临时共享 `require_teacher` 管理凭据调用 `/teacher/llm-provider`：GET 查询当前配置，PUT 原子保存并激活配置，GET `/credentials` 查询凭据身份及可用状态，POST `/credentials/{credential_id}/disable` 显式停用。PUT 使用 `provider`、`model`、可选 `region`、`workspace`，以及新 `api_key` 或已保存 `credential_id` 两者之一。接口不接受 Endpoint，且不返回凭据或密文；目前 Qwen 支持 `qwen-plus`、`qwen-turbo`，DeepSeek 支持 `deepseek-flash`、`deepseek-v4-pro`。正式登录启用后应改用管理员专属权限。
 
 `VNEXT_LLM_PROVIDER_ENCRYPTION_KEY` 是环境提供的私有 Fernet 主密钥。创建凭据按供应商递增版本，加密内容绑定凭据身份、来源及版本；重新选择需验证归属、状态与可解密性。配置与审计追加保存，停用不可撤销；禁用或无法解密时不回退旧凭据。全局事务锁将配置变更、凭据状态和领取配置快照串行化。
