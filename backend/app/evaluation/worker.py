@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.identity import canonical_json as _json
-from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.models import EvaluationDiagnosticEvidence, EvaluationJob, RawEvaluation
 from app.evaluation.source_identity import (
     _recording_identity,
     speaking_source,
@@ -63,10 +63,13 @@ class Adapter(Protocol):
 class KnownFailure(Exception):
     """A classified failure whose external outcome is known."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, diagnostic: dict | None = None):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", code):
             raise ValueError("Invalid diagnostic code")
         self.code = code
+        if diagnostic is not None and not isinstance(diagnostic, dict):
+            raise ValueError("Invalid diagnostic evidence")
+        self.diagnostic = diagnostic
         super().__init__(code)
 
 
@@ -398,6 +401,7 @@ def _finish(
     status: str,
     result: AdapterResult | None = None,
     error_code: str | None = None,
+    diagnostic: dict | None = None,
 ) -> bool:
     with Session(engine) as s, s.begin():
         job = s.scalar(
@@ -414,23 +418,29 @@ def _finish(
             or job.lease_until <= now
         ):
             return False
-        s.add(
-            RawEvaluation(
-                evaluation_id=uuid4(),
-                job_id=job.job_id,
-                submission_id=job.submission_id,
-                execution_id=claim.token,
-                status=status,
-                input_refs=job.input_refs,
-                input_fingerprint=job.input_fingerprint,
-                execution_snapshot=job.execution_snapshot,
-                provider=result.provider if result else None,
-                model=result.model if result else None,
-                engine_version=result.engine_version if result else None,
-                payload=result.payload if status == "READY" else None,
-                error_code=error_code,
-            )
+        raw = RawEvaluation(
+            evaluation_id=uuid4(),
+            job_id=job.job_id,
+            submission_id=job.submission_id,
+            execution_id=claim.token,
+            status=status,
+            input_refs=job.input_refs,
+            input_fingerprint=job.input_fingerprint,
+            execution_snapshot=job.execution_snapshot,
+            provider=result.provider if result else None,
+            model=result.model if result else None,
+            engine_version=result.engine_version if result else None,
+            payload=result.payload if status == "READY" else None,
+            error_code=error_code,
         )
+        s.add(raw)
+        if diagnostic is not None:
+            if status == "READY":
+                raise ValueError("Diagnostics require an unsuccessful evaluation")
+            s.flush()
+            s.add(
+                EvaluationDiagnosticEvidence(evaluation_id=raw.evaluation_id, evidence=diagnostic)
+            )
         job.status, job.error_code = status, error_code
         job.claim_token, job.lease_until = None, None
         s.flush()
@@ -509,7 +519,9 @@ def execute_claim(engine: Engine, claim: Claim) -> bool:
     try:
         result = claim.adapter.evaluate(inputs, requirement)
     except KnownFailure as exc:
-        return _finish(engine, claim, status="FAILED", error_code=exc.code)
+        return _finish(
+            engine, claim, status="FAILED", error_code=exc.code, diagnostic=exc.diagnostic
+        )
     except Exception:  # noqa: BLE001 - external outcome may be unknown; do not log private payloads
         return _finish(engine, claim, status="UNKNOWN", error_code="EXTERNAL_OUTCOME_UNKNOWN")
     try:

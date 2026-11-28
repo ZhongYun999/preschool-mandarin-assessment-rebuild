@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -140,3 +141,18 @@ class RawEvaluation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class EvaluationDiagnosticEvidence(Base):
+    """Immutable diagnostic evidence for one unsuccessful evaluation execution."""
+
+    __tablename__ = "evaluation_diagnostic_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'", name="ck_evaluation_diagnostic_object"
+        ),
+    )
+    evaluation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("raw_evaluations.evaluation_id"), primary_key=True
+    )
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False)
