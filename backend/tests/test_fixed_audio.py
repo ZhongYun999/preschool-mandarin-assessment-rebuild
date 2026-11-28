@@ -269,6 +269,7 @@ def test_database_failure_after_file_write_does_not_commit_reference(db, bank, t
     assert len(synth.calls) == 1
 
 
+@pytest.mark.db_isolated
 def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
     paper_id, _, a, _, _ = published(db, bank)
     store = AudioStore(tmp_path)
@@ -300,6 +301,7 @@ def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
         )
 
 
+@pytest.mark.db_isolated
 def test_downgrade_refuses_copied_draft_audio_without_published_paper(db, bank):
     (
         paper_id,

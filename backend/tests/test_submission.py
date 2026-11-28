@@ -230,6 +230,7 @@ def test_closed_session_refuses_playback_submit_and_redo(db, context):
             operation(s)
 
 
+@pytest.mark.db_isolated
 def test_downgrade_preserves_facts(db, context):
     deliver(db, context)
     with Session(db) as s, s.begin():
@@ -312,6 +313,7 @@ def test_no_guide_and_no_evaluation_requirements(db, bank, tmp_path):
         assert s.scalar(select(func.count()).select_from(EvaluationIntent)) == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_rejects_legacy_sealed_attempt_without_submission(db, context):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as c:

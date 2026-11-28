@@ -299,6 +299,7 @@ def test_failed_playback_state_actions(db, client, setup_api):
     assert "RETRY_PLAYBACK" in actions and "START_GUIDE" in actions
 
 
+@pytest.mark.db_isolated
 def test_downgrade_rejects_existing_credentials(db, client, setup_api):
     sid = client.post(
         "/teacher/assessment/sessions", json=create_body(setup_api["paper_id"]), headers=AUTH
@@ -413,6 +414,7 @@ def test_token_transaction_failure_and_auth_failure_are_safe(db, client, setup_a
     )
 
 
+@pytest.mark.db_isolated
 def test_existing_sessions_survive_credential_migration(db, client, setup_api):
     sid = client.post(
         "/teacher/assessment/sessions", json=create_body(setup_api["paper_id"]), headers=AUTH

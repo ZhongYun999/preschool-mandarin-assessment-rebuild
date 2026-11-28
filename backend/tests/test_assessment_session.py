@@ -330,6 +330,7 @@ def test_concurrent_create_and_redo(db, ready):
         assert current in results and s.get(Attempt, current).status == "OPEN"
 
 
+@pytest.mark.db_isolated
 def test_downgrade_rejects_existing_data(db, ready):
     created(db, ready)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))

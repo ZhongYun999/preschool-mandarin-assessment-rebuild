@@ -29,6 +29,7 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["db_isolated: use a dedicated migrated schema for migration or schema-level tests"]
 
 [tool.ruff]
 target-version = "py312"
