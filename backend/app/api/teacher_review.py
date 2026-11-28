@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_db
-from app.api.teacher_auth import require_review_teacher
+from app.api.teacher_auth import Identity, require_review_teacher
 from app.scoring.models import ReviewedPaperScore
 from app.scoring.registry import PRODUCTION_REGISTRY, Registry, ScoringUnavailable
 from app.scoring.review import InvalidOverride, ReviewConflict, record_review
@@ -86,7 +86,7 @@ def submit_review(
     session_id: UUID,
     session_task_id: UUID,
     body: ReviewRequest,
-    teacher_id: str = teacher_dependency,
+    teacher: Identity = teacher_dependency,
     db: Session = db_dependency,
     registry: Registry = registry_dependency,
 ):
@@ -109,7 +109,8 @@ def submit_review(
                 session_task_id=session_task_id,
                 submission_id=body.submission_id,
                 operation_id=body.operation_id,
-                teacher_id=teacher_id,
+                teacher_id=str(teacher.user_id),
+                reviewer_user_id=teacher.user_id,
                 expected_revision=body.expected_revision,
                 action=body.action,
                 override_value=body.override_value,

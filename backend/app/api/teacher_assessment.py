@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_audio_store, get_db
-from app.api.teacher_auth import require_teacher
+from app.api.teacher_auth import require_admin, require_teacher
 from app.api.teacher_review import get_scoring_registry
 from app.media.fixed_audio import AudioStore
 from app.papers.paper import Paper, PaperEntry
@@ -35,7 +35,7 @@ class SpeakingPolicyInput(BaseModel):
     minimum_duration_seconds: float = Field(gt=0, allow_inf_nan=False, strict=True)
 
 
-@router.put("/speaking-policy")
+@router.put("/speaking-policy", dependencies=[Depends(require_admin)])
 def set_speaking_policy(body: SpeakingPolicyInput, db: Session = db_dependency):
     with db.begin():
         stmt = insert(SpeakingPolicy).values(
@@ -52,7 +52,7 @@ def set_speaking_policy(body: SpeakingPolicyInput, db: Session = db_dependency):
         return {"minimum_duration_seconds": row.minimum_duration_seconds, "revision": row.revision}
 
 
-@router.get("/speaking-policy")
+@router.get("/speaking-policy", dependencies=[Depends(require_admin)])
 def get_speaking_policy(db: Session = db_dependency):
     policy = db.get(SpeakingPolicy, 1)
     if policy is None:

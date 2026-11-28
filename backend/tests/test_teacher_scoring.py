@@ -30,9 +30,9 @@ def test_auth_and_missing_session(client, monkeypatch):
         assert client.get(url, headers={"Authorization": "Bearer wrong"}).status_code == 401
         if url != urls[0]:
             assert client.get(url, headers=AUTH).status_code == 404
-    monkeypatch.delenv("TEACHER_MANAGEMENT_TOKEN")
+    monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "legacy-token")
     for url in urls:
-        assert client.get(url, headers=AUTH).status_code == 503
+        assert client.get(url, headers={"Authorization": "Bearer legacy-token"}).status_code == 401
 
 
 def test_unclosed_and_final_no_review(db, client, two_tasks, tmp_path):

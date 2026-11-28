@@ -1,5 +1,6 @@
 from alembic import context
 
+from app.auth import models as auth_models  # noqa: F401
 from app.database import Base, create_database_engine
 from app.evaluation import models as evaluation_models  # noqa: F401
 from app.evaluation import (

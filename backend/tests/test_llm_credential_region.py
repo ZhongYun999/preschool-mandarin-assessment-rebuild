@@ -233,13 +233,22 @@ def test_region_ciphertext_tampering_fails_closed(region, master):
 
 
 @pytest.mark.db_isolated
-def test_upgrade_preserves_existing_evaluation_snapshot(db, qa_formal):
+def test_upgrade_preserves_existing_evaluation_snapshot(db, qa_formal, monkeypatch):
+    from uuid import uuid4
+
     from test_asr_dependency import claim
     from test_qa_formal_text_contract import FakeText
 
+    from app.api.teacher_auth import Identity, get_current_user
     from app.evaluation import qa_formal_text_contract as business
     from app.evaluation.models import EvaluationJob, RawEvaluation
     from app.evaluation.worker import execute_claim
+    from app.main import app
+
+    # This test intentionally creates historical business data at 0025, before
+    # the authentication tables exist. Authentication itself is tested at head.
+    identity = Identity(uuid4(), uuid4(), "historical", "Historical", "admin", "test")
+    monkeypatch.setitem(app.dependency_overrides, get_current_user, lambda: identity)
 
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as c:

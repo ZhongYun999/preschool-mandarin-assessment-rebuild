@@ -139,6 +139,9 @@ def test_migration_existing_credentials_and_guard(db, client, setup_api):
         connection.commit()
         command.upgrade(config, "head")
         connection.commit()
+    from auth_helpers import prepare_admin
+
+    prepare_admin(db)
     assert (
         client.get(f"/assessment/sessions/{sid}", headers=access(credential["token"])).status_code
         == 200
