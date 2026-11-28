@@ -15,6 +15,7 @@ config = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(config)
 
 
+@pytest.mark.db_isolated
 def test_credentials_encrypt_and_pin_identity(db):
     config.initialize(db)
     config.initialize(db)
@@ -55,6 +56,7 @@ def test_credentials_encrypt_and_pin_identity(db):
             config.resolve(s, key, credential_id, "dashscope")
 
 
+@pytest.mark.db_isolated
 def test_local_provider_http_does_not_expose_secrets(db, tmp_path, monkeypatch, caplog):
     from fastapi.testclient import TestClient
 

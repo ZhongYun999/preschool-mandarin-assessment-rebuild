@@ -42,6 +42,7 @@ from app.evaluation.qa_text_contract import (
 from app.evaluation.qa_text_contract import SOURCE as LLM_SOURCE
 from app.evaluation.qa_text_contract import VERSION as LLM_VERSION
 from app.evaluation.qwen_qa_text import QwenQAText
+from app.evaluation.source_identity import recording_input
 from app.evaluation.worker import (
     AdapterResult,
     InputSnapshot,
@@ -49,7 +50,6 @@ from app.evaluation.worker import (
     authorize_retry,
     claim_job,
     execute_claim,
-    recording_input,
     schedule,
 )
 from app.media.audio_inspection import AudioError, AudioTools

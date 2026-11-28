@@ -18,6 +18,7 @@ spec.loader.exec_module(workbench)
 
 
 @pytest.mark.parametrize("media_type", ["audio/wav", "audio/webm"])
+@pytest.mark.db_isolated
 def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
     from app.evaluation.dashscope_asr import DashScopeASR
     from app.evaluation.qwen_qa_text import QwenQAText
@@ -148,7 +149,7 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
         c.post(f"/dev/qa/sessions/{sid}/run-offline")
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").json() == diag
         assert (
-            c.post(base + "/redo", headers=auth, json={"redo_request_id": "redo"}).status_code
+            c.post(base + "/redo", headers=auth, json={"redo_request_id": "redo", "expected_attempt_id": aid}).status_code
             == 200
         )
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").json()["submission"] is None
@@ -157,6 +158,7 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
     )
 
 
+@pytest.mark.db_isolated
 def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
     app = workbench.create_app(db, tmp_path)
     with TestClient(
@@ -233,7 +235,7 @@ def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
         assert all(t["submission_exists"] for t in state["tasks"])
         assert (
             c.post(
-                second_base + "/redo", headers=auth, json={"redo_request_id": "redo"}
+                second_base + "/redo", headers=auth, json={"redo_request_id": "redo", "expected_attempt_id": a2}
             ).status_code
             == 200
         )

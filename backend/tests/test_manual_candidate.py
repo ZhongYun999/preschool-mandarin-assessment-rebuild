@@ -22,6 +22,7 @@ spec.loader.exec_module(workbench)
 
 
 @pytest.mark.parametrize("scenario", ["text", "no_text", "rejected", "timeout", "invalid"])
+@pytest.mark.db_isolated
 def test_candidate_chain_is_authorized_bounded_and_frozen(db, tmp_path, monkeypatch, scenario):
     monkeypatch.setenv("VNEXT_PROVIDER_CREDENTIAL_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("DASHSCOPE_API_KEY", "unused-environment-fake")
@@ -222,7 +223,7 @@ def test_candidate_chain_is_authorized_bounded_and_frozen(db, tmp_path, monkeypa
             )
             assert diag2["jobs"][0]["evidence"]["id"] != diag["jobs"][0]["evidence"]["id"]
             assert (
-                c.post(base2 + "/redo", headers=auth, json={"redo_request_id": "redo"}).status_code
+                c.post(base2 + "/redo", headers=auth, json={"redo_request_id": "redo", "expected_attempt_id": aid2}).status_code
                 == 200
             )
             assert c.get(url + "/diagnostics" + query2).json()["submission"] is None
@@ -282,6 +283,7 @@ def test_candidate_chain_is_authorized_bounded_and_frozen(db, tmp_path, monkeypa
             assert c.get(url + "/diagnostics" + query).json() == diag
 
 
+@pytest.mark.db_isolated
 def test_default_server_never_authorizes_or_dispatches(db, tmp_path, monkeypatch):
     monkeypatch.setenv("VNEXT_PROVIDER_CREDENTIAL_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("DASHSCOPE_API_KEY", "fake-environment-secret")
