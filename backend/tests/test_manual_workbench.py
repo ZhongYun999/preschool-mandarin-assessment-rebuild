@@ -6,6 +6,7 @@ import wave
 from pathlib import Path
 
 import pytest
+from auth_helpers import prepare_admin
 from fastapi.testclient import TestClient
 
 from app.main import app as production_app
@@ -15,6 +16,20 @@ spec = importlib.util.spec_from_file_location(
 )
 workbench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(workbench)
+
+
+def prepare_login(db, monkeypatch):
+    monkeypatch.setenv("VNEXT_AUTH_COOKIE_SECURE", "false")
+    monkeypatch.setenv("VNEXT_AUTH_ALLOWED_ORIGINS", "http://127.0.0.1:8000")
+    prepare_admin(db)
+
+
+def login_admin(client):
+    response = client.post(
+        "/auth/login", json={"username": "test-admin", "password": "vnext-invalid-login-dummy"}
+    )
+    assert response.status_code == 200
+    client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
 
 
 @pytest.mark.parametrize("media_type", ["audio/wav", "audio/webm"])
@@ -31,6 +46,7 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
     monkeypatch.setattr(QwenQAText, "evaluate", forbidden)
     if media_type == "audio/webm" and not shutil.which("ffmpeg"):
         pytest.skip("FFmpeg is required for WebM validation")
+    prepare_login(db, monkeypatch)
     app = workbench.create_app(db, tmp_path)
     with TestClient(
         app,
@@ -39,6 +55,8 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
         headers={"Origin": "http://127.0.0.1:8000"},
     ) as c:
         assert c.get("/dev/qa").status_code == 200
+        assert c.get("/dev/qa/sessions").status_code == 401
+        login_admin(c)
         assert c.post("/dev/qa/sessions", headers={"Origin": "http://evil.test"}).status_code == 403
         assert c.post("/dev/qa/run-real").status_code == 404
         created = c.post("/dev/qa/sessions")
@@ -149,7 +167,11 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
         c.post(f"/dev/qa/sessions/{sid}/run-offline")
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").json() == diag
         assert (
-            c.post(base + "/redo", headers=auth, json={"redo_request_id": "redo", "expected_attempt_id": aid}).status_code
+            c.post(
+                base + "/redo",
+                headers=auth,
+                json={"redo_request_id": "redo", "expected_attempt_id": aid},
+            ).status_code
             == 200
         )
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").json()["submission"] is None
@@ -159,7 +181,8 @@ def test_workbench_chain(db, tmp_path, media_type, monkeypatch):
 
 
 @pytest.mark.db_isolated
-def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
+def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path, monkeypatch):
+    prepare_login(db, monkeypatch)
     app = workbench.create_app(db, tmp_path)
     with TestClient(
         app,
@@ -167,6 +190,7 @@ def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
         client=("127.0.0.1", 12345),
         headers={"Origin": "http://127.0.0.1:8000"},
     ) as c:
+        login_admin(c)
         sid = c.post("/dev/qa/sessions?count=2").json()["session_id"]
         token = c.post(f"/dev/qa/sessions/{sid}/token").json()["token"]
         auth = {"Authorization": "Bearer " + token}
@@ -235,7 +259,9 @@ def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
         assert all(t["submission_exists"] for t in state["tasks"])
         assert (
             c.post(
-                second_base + "/redo", headers=auth, json={"redo_request_id": "redo", "expected_attempt_id": a2}
+                second_base + "/redo",
+                headers=auth,
+                json={"redo_request_id": "redo", "expected_attempt_id": a2},
             ).status_code
             == 200
         )
@@ -255,3 +281,17 @@ def test_two_tasks_delayed_evaluation_and_redo_isolation(db, tmp_path):
         assert replacement["jobs"][0]["evidence"]["id"] != second["jobs"][0]["evidence"]["id"]
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={ids[0]}").json() == first
         assert c.get(f"/dev/qa/sessions/{sid}/diagnostics").status_code == 404
+
+
+def test_workbench_rejects_non_test_database_before_connecting(tmp_path):
+    from sqlalchemy import create_engine, event
+
+    engine = create_engine("postgresql+psycopg://fixture@127.0.0.1:5432/production")
+    calls = []
+    event.listen(engine, "connect", lambda *args: calls.append("connected"))
+    try:
+        with pytest.raises(ValueError, match="local test database"):
+            workbench.create_app(engine, tmp_path)
+        assert calls == []
+    finally:
+        engine.dispose()

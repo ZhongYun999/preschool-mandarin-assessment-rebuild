@@ -185,37 +185,28 @@ ASR 适配器可用 `recording_input()` 取得所属录音身份、摘要、存�
 
 参考：[Qwen Chat API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)、[地域](https://help.aliyun.com/zh/model-studio/regions)。
 
-## 本地 QA 评价测试工作台
+## 本地语音评价测试工作台
 
-此工具仅供 Windows 本机研发测试，不属于生产应用或正式儿童施测端。先在 `backend/.env` 配置 `TEST_DATABASE_URL`，其 PostgreSQL 主机须为 `127.0.0.1` 或 `::1`、包含端口且数据库名须为 `vnext_eval02e_test`；工具拒绝 URL 查询参数及 `PG*` 环境变量，并校验实际连接的数据库和 TCP 对端。若该库尚未迁移，先在 `backend` 目录中仅对该测试库运行现有 Alembic 迁移：
+此工具仅用于本机研发，不挂载到生产应用。它只允许连接本机 PostgreSQL 上明确指定的 `vnext_eval02e_test`，不得放入生产数据或真实儿童信息。准备独立测试库及私有 `backend/.env` 或进程环境：`TEST_DATABASE_URL` 必须使用 `postgresql+psycopg`、显式端口和 `127.0.0.1` 或 `::1`。安装后端依赖并确保 PATH 中有 FFmpeg、FFprobe。
 
-```powershell
-..\.venv\Scripts\python.exe tests/manual/workbench.py --migrate
-```
-
-从仓库根目录启动（需要项目 `.venv` 和 PATH 中的 FFmpeg、FFprobe）：
+工作台使用正式管理员账户。将 `VNEXT_AUTH_ALLOWED_ORIGINS` 包含 `http://127.0.0.1:8000`；本机 HTTP 明确设置 `VNEXT_AUTH_COOKIE_SECURE=false`。在当前进程明确设置 `TEST_DATABASE_URL` 后，从仓库根目录执行：
 
 ```powershell
-cd backend
-..\.venv\Scripts\python.exe tests/manual/workbench.py
+.\.venv\Scripts\python.exe backend/tests/manual/workbench.py --migrate
+.\.venv\Scripts\python.exe backend/scripts/create_admin.py --database-env TEST_DATABASE_URL
+.\.venv\Scripts\python.exe backend/tests/manual/workbench.py
 ```
 
-打开 <http://127.0.0.1:8000/dev/qa>。服务只监听 `127.0.0.1:8000`，测试路由不会挂到 `app.main`。准备场次会通过领域发布逻辑建立独立测试题库、试卷、评价计划与 Session；原始数据保存在上述测试库，音频保存在被 Git 忽略的 `uploads/local-qa-workbench/`。页面刷新不会清理数据。不得在该库放入生产数据。
+若 pip 不支持 `--project`，可在 `backend` 目录运行 `..\.venv\Scripts\python.exe -m pip install -e ".[dev]"`。管理员命令隐藏输入密码，不在命令行接收密码。打开 <http://127.0.0.1:8000/dev/qa> 并登录；服务仅监听本机。音频保存在被 Git 忽略的私有 `uploads/local-qa-workbench/`，不得提交。发布题目的固定音频仍是无语义测试提示音，页面显示编辑后的题干和参考文本；不调用 TTS。
 
-在页面显式开始题目，播放首播，再授权浏览器麦克风并录音；也可选择已有音频文件进行排查。提示音是无语义 WAV，仅用于播放协议测试。浏览器使用 MediaRecorder 支持的 MIME 类型，上传原始字节；离线 ASR 作业通过现有 FFprobe/FFmpeg 检查并转换音频，诊断中显示实际容器和编码。上传 SAVED 后须显式正式提交；手动点击离线评价才会调度当前 Submission 的作业。Mock 的固定文本和四维数据只用于验证依赖链，**不代表真实模型输出或正式成绩**。
+页面可选择问答或跟读，编辑虚构题目和参考文本，使用浏览器录音或本地文件，完成播放、录音及正式 Submission。主动结束录音后自动上传；上传失败可使用同一录音身份重试。刷新、上传、提交和状态查询均不会外发评价。显式整题重做保留原请求和预期 Attempt 身份以支持网络重试。离线 Mock 需手动执行，结果仅用于验证流程。
 
-浏览器声明的完整 MIME（包括编码参数）仅保存在本机浏览器存储中；现有录音接口保存基础媒体类型。FFprobe 的实际容器和编码以诊断证据为准。
+### 私有凭据与受控真实测试
 
-可选择创建单题或两题场次，并在同一 Session 内切换题目。主动结束麦克风录音后，页面等待完整录音数据并自动上传；录音异常中断时不会自动上传。上传失败时在页面保留音频与 Recording 身份，可点击“上传或重试原始录音”；正式提交仍须手动确认。本机文件入口仍需手动上传。
+- 文本评价使用正式全局配置：私有环境设置 `VNEXT_LLM_PROVIDER_ENCRYPTION_KEY`，管理员在页面选择 Qwen 或 DeepSeek、模型并录入 API Key。配置和停用走正式接口，领取时冻结实际供应商、模型、配置与凭据版本；旧工作台 `dev_qa_*` 凭据不会读取或迁移，需要重新录入。
+- QA 的 Qwen3-ASR 独立使用 `DASHSCOPE_API_KEY`、`VNEXT_QA_ASR_REGION` 和 `VNEXT_QA_ASR_WORKSPACE`，不随文本供应商切换。
+- 讯飞 ISE 从私有环境读取 `IFLYTEK_ISE_APP_ID`、`IFLYTEK_ISE_API_KEY` 和 `IFLYTEK_ISE_API_SECRET`。页面仅显示各项是否配置与最近一次授权执行状态；已配置不代表服务已连通。支持 `read_sentence`，按页面显式选择群体和可选学段，不代表学前儿童适用性已验证。
 
-刷新会从服务器恢复状态，不会自动上传、提交或执行评价；页面关闭后本地未上传录音可能丢失，可以取消服务端 STARTED 录音并重新录制。中断的播放应报告未完成，再选择技术重试；提交结果不确定时刷新查看 ACCEPTED。各题的离线评价需切换到相应题目并手动执行，可以在继续作答其他题后再执行；此入口不是常驻自动 Worker。失败或未知作业可在页面显式授权重试，UNKNOWN 需明确确认；之后再手动执行离线评价。
+真实调用默认关闭。用户需要时先在私有进程显式设置 `VNEXT_QA_PAID_TESTS=enabled` 后启动服务；使用本人成人录音或合法合成语音，在对应题正式提交后确认音频授权及收费，再手动点击执行。QA 每次授权最多一次 ASR，只有有效 TEXT 才会执行一次 LLM；跟读每次授权最多一次 ISE。失败和无效结果不会自动重试；UNKNOWN 必须先明确接受不确定性，再重新授权调用。重复查询与刷新不会调用供应商。
 
-### 本地 Qwen 候选配置与受控联调
-
-工作台默认是离线 Mock。真实候选仅用于本地联调，不是生产评分；必须先安装开发依赖（包括 `cryptography`）。首次使用时在 `backend` 目录执行 `..\.venv\Scripts\python.exe tests/manual/workbench.py --generate-provider-key`，程序生成独立主密钥并保存在当前用户的 `.codex/vnext-qa-private/provider.key`，Windows 下限制为当前用户、系统和管理员可读；不会显示密钥。也可通过进程环境变量 `VNEXT_PROVIDER_CREDENTIAL_KEY` 提供主密钥，环境变量优先。请自行安全备份主密钥，丢失后已有密文无法解密；不得提交或发送它。命令不会覆盖现有主密钥。
-
-在页面“本地供应商配置”填写 DashScope 的地域、Workspace 和 API Key；密钥仅经本机连接提交，后端以 Fernet 加密存储在测试库独立 `dev_qa_*` 表，查询不返回明文或密文。更新地域或 Workspace 时勾选“明确保留当前凭据”；输入新 Key 并确认轮换会创建新的凭据身份及版本，旧凭据保留供已冻结场次使用。显式停用会使引用该凭据的旧任务不可执行；不可解密或停用时不回退其他密钥。工具初始化自己的版本表和测试表，不改正式 Alembic 迁移历史。
-
-在“新场次模式”选择 Qwen 真实候选后创建新场次；已有 Mock 场次不会被替换。每个候选试卷固定对应配置身份、模型、地域、Workspace、音频规格和 Prompt 版本及摘要；后续修改配置不改变已发布计划。作答及提交不会触发模型。诊断显示实际作业和证据；**候选原始评价不代表正式成绩**。
-
-本轮没有真实调用授权。未来仅在单独获得本次收费授权后，使用已获合法授权且非未经授权儿童的录音，启动前在当前私有 PowerShell 进程显式设置 `$env:VNEXT_QA_PAID_TESTS='enabled'`，启动服务，在对应候选题提交后逐项确认音频授权和最多一次 ASR、一次 LLM 的收费预算，再手动执行。一次授权绑定一个 Submission，LLM 仅在 ASR 有有效 TEXT 时执行；重复点击和服务重启不会补发已消耗的预算。失败、无效及 UNKNOWN 不自动重试；由于可能已产生费用，不要通过刷新、重做或新建场次绕过预算，须先检查供应商用量并另行取得授权。真实供应商权限、音频兼容、网络及模型结果质量均尚未通过本工具在线验证。使用后停止服务并移除当前进程的 `VNEXT_QA_PAID_TESTS`。若端口被占用请停止占用该端口的进程，不要改为对外监听。
+页面中的维度和分数均为**供应商原始评价，不是正式单题成绩**。拒识不生成 READY 评分；历史诊断按单次执行保留。合同与限制见 [ISE 跟读原始评价合同](docs/testing/IFLYTEK_ISE_REPETITION.md)。真实服务连通性、计费和学前适用性未由离线测试证明。

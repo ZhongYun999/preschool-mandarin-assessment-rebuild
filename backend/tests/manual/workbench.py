@@ -7,7 +7,6 @@ import math
 import os
 import socket
 import struct
-import subprocess
 import sys
 import wave
 from dataclasses import asdict
@@ -15,10 +14,10 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from dotenv import dotenv_values
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from dotenv import load_dotenv
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import create_engine, select, text, update
+from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -26,22 +25,23 @@ from app.api.assessment_operations import router as operations
 from app.api.assessment_repetition import get_recording_store
 from app.api.assessment_repetition import router as recordings
 from app.api.assessment_session import router as assessments
+from app.api.auth import router as authentication
+from app.api.db import get_auth_db
 from app.api.teacher_api import get_audio_store, get_db
 from app.api.teacher_assessment import issue_access_token
+from app.api.teacher_auth import require_admin
+from app.api.teacher_llm_provider import router as llm_provider
+from app.evaluation import iflytek_ise as ise
+from app.evaluation import qa_formal_text_contract as formal_text
 from app.evaluation.asr_contract import MODEL as ASR_MODEL
 from app.evaluation.asr_contract import SOURCE as ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as ASR_VERSION
 from app.evaluation.dashscope_asr import DashScopeASR
-from app.evaluation.models import EvaluationJob, RawEvaluation
+from app.evaluation.models import EvaluationDiagnosticEvidence, EvaluationJob, RawEvaluation
 from app.evaluation.qa_text_contract import (
-    PROMPT_SHA256,
-    PROMPT_VERSION,
-    valid_parameters,
     valid_result,
 )
-from app.evaluation.qa_text_contract import SOURCE as LLM_SOURCE
-from app.evaluation.qa_text_contract import VERSION as LLM_VERSION
-from app.evaluation.qwen_qa_text import QwenQAText
+from app.evaluation.qa_text_providers import DynamicQAText
 from app.evaluation.source_identity import recording_input
 from app.evaluation.worker import (
     AdapterResult,
@@ -58,7 +58,7 @@ from app.media.audio_normalization import prepare_audio as normalize
 from app.media.fixed_audio import AudioData, AudioStore, prepare_audio
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
-from app.papers.paper import add_entry, create_draft
+from app.papers.paper import EvaluationPlan, Paper, PaperEntry, add_entry, create_draft
 from app.papers.publication import publish, select_plugin
 from app.scoring.registry import QWEN_ASR_CONTRACT, EvaluationContract, Registry
 from app.sessions.assessment_session import AssessmentSession, SessionTask, create_session
@@ -67,10 +67,13 @@ from app.taskbank.models import RevisionContent, TaskBank, append_revision
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-_spec = importlib.util.spec_from_file_location("qa_provider_config", HERE / "provider_config.py")
-provider_config = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(provider_config)
+_spec = importlib.util.spec_from_file_location("qa_authorization", HERE / "authorization.py")
+authorization = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(authorization)
 SCOPE = "local-qa-workbench-v1"
+LLM_SOURCE = formal_text.SOURCE
+LLM_VERSION = formal_text.VERSION
+optional_body = Body(default=None)
 ASR = {"source": "local-mock-asr", "version": "1", "parameters": {}}
 LLM = {
     "source": "local-mock-llm",
@@ -100,23 +103,29 @@ class CandidatePlugin(TestPlugin):
     plugin_id = "local-qa-qwen-candidate"
     display_name = "Qwen 候选评价（不计分）"
 
-    def __init__(self, version, requirements):
+    def __init__(self, version, requirements, task_type="qa"):
         self.implementation_version = version
-        self.evaluation_requirements = {"qa": requirements}
+        self.evaluation_requirements = {task_type: requirements}
 
 
-def candidate_registry(version, requirements):
+def candidate_registry(version, requirements, task_type="qa"):
     return Registry(
-        [CandidatePlugin(version, requirements)],
+        [CandidatePlugin(version, requirements, task_type)],
         [
             QWEN_ASR_CONTRACT,
             EvaluationContract(
                 LLM_SOURCE,
                 LLM_VERSION,
                 frozenset({"qa"}),
-                valid_parameters,
+                formal_text.valid_parameters,
                 lambda p: p["evaluation"]["review_recommended"],
                 accepts_no_text=False,
+            ),
+            EvaluationContract(
+                ise.SOURCE, ise.VERSION, frozenset({"repetition"}), ise.valid_parameters, False
+            ),
+            EvaluationContract(
+                "local-mock-ise", "1", frozenset({"repetition"}), ise.valid_parameters, False
             ),
         ],
     )
@@ -230,10 +239,57 @@ class MockLLM:
         return valid_result(result.payload)
 
 
-def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, master_key=None):
-    if master_key is None:
-        master_key = os.environ.get("VNEXT_PROVIDER_CREDENTIAL_KEY")
-    provider_config.initialize(engine)
+class MockISE:
+    def resolve_inputs(self, session, submission, revision, requirement):
+        if revision.task_type != "repetition" or not ise.valid_parameters(
+            requirement["parameters"]
+        ):
+            raise ValueError("Invalid mock Repetition input")
+        recording = recording_input(session, submission)
+        return InputSnapshot(
+            refs={key: recording[key] for key in ("recording_id", "sha256", "media_type")},
+            payload={"recording": recording},
+        )
+
+    def evaluate(self, inputs, requirement):
+        return AdapterResult(payload={"simulated": True}, provider="Mock", model="offline-mock-ise")
+
+    def validate_result(self, result, requirement):
+        return result.provider == "Mock" and result.payload == {"simulated": True}
+
+
+def create_app(
+    engine,
+    data_root,
+    *,
+    paid_enabled=False,
+    client_factory=None,
+    text_client_factories=None,
+    ise_socket_factory=None,
+):
+    url = engine.url
+    if (
+        url.drivername != "postgresql+psycopg"
+        or url.host not in ("localhost", "127.0.0.1", "::1")
+        or not url.port
+        or not url.database
+        or not (url.database.startswith("test_") or url.database.endswith("_test"))
+        or url.query
+        or any(k.upper().startswith("PG") and v for k, v in os.environ.items())
+    ):
+        raise ValueError("Workbench requires an explicitly selected local test database")
+    with engine.connect() as connection:
+        database, address, port = connection.execute(
+            text("SELECT current_database(), inet_server_addr(), inet_server_port()")
+        ).one()
+        if (
+            database != url.database
+            or not ipaddress.ip_address(str(address)).is_loopback
+            or (url.host != "localhost" and str(address) != url.host)
+            or port != url.port
+        ):
+            raise ValueError("Unexpected workbench test database connection")
+    authorization.initialize(engine)
     fixed = AudioStore(data_root / "fixed")
     store = RecordingStore(data_root / "recordings")
     derived = RecordingStore(data_root / "derived")
@@ -244,8 +300,11 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
             yield db
 
     app.dependency_overrides[get_db] = db_dependency
+    app.dependency_overrides[get_auth_db] = db_dependency
     app.dependency_overrides[get_audio_store] = lambda: fixed
     app.dependency_overrides[get_recording_store] = lambda: store
+    app.include_router(authentication)
+    app.include_router(llm_provider)
     app.include_router(assessments)
     app.include_router(operations)
     app.include_router(recordings)
@@ -285,15 +344,31 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
         return task
 
     def candidate_paper(db, owner):
-        return (
-            db.execute(
-                select(provider_config.paper_configs).where(
-                    provider_config.paper_configs.c.paper_id == str(owner.paper_id)
-                )
-            )
-            .mappings()
-            .one_or_none()
+        paper = db.get(Paper, owner.paper_id)
+        if paper.scoring_plugin_id == TestPlugin.plugin_id:
+            return None
+        plan = db.scalar(
+            select(EvaluationPlan)
+            .join(PaperEntry)
+            .where(PaperEntry.paper_id == owner.paper_id)
+            .order_by(PaperEntry.position)
+            .limit(1)
         )
+        if plan is None or paper.scoring_plugin_id != CandidatePlugin.plugin_id:
+            raise HTTPException(409, "Historical workbench session must be recreated")
+        sources = {item["source"] for item in plan.requirements}
+        mode = (
+            "ise"
+            if ise.SOURCE in sources
+            else "mock-ise"
+            if "local-mock-ise" in sources
+            else "qwen"
+        )
+        return {
+            "mode": mode,
+            "requirements": plan.requirements,
+            "plugin_version": paper.scoring_plugin_version,
+        }
 
     @app.get("/dev/qa")
     def page():
@@ -303,45 +378,7 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
     def script():
         return FileResponse(HERE / "app.js", media_type="application/javascript")
 
-    @app.get("/dev/qa/provider-config")
-    def provider_status():
-        with Session(engine) as db:
-            return provider_config.status(db, master_key)
-
-    @app.post("/dev/qa/provider-config")
-    async def provider_save(request: Request):
-        try:
-            data = await request.json()
-            if not isinstance(data, dict) or set(data) != {
-                "region",
-                "workspace",
-                "api_key",
-                "retain_credential_id",
-            }:
-                raise ValueError
-            with Session(engine) as db, db.begin():
-                config_id = provider_config.save(
-                    db,
-                    master_key,
-                    region=data["region"],
-                    workspace=data["workspace"],
-                    api_key=data["api_key"],
-                    retain_credential_id=data["retain_credential_id"],
-                )
-            return {"config_id": config_id}
-        except (ValueError, TypeError, KeyError):
-            raise HTTPException(422, "Provider configuration unavailable or invalid") from None
-
-    @app.post("/dev/qa/provider-config/{credential_id}/disable")
-    def provider_disable(credential_id: UUID):
-        try:
-            with Session(engine) as db, db.begin():
-                provider_config.disable(db, credential_id)
-            return {"status": "disabled"}
-        except provider_config.CredentialUnavailable:
-            raise HTTPException(404, "Credential unavailable") from None
-
-    @app.get("/dev/qa/sessions")
+    @app.get("/dev/qa/sessions", dependencies=[Depends(require_admin)])
     def sessions():
         with Session(engine) as db:
             return [
@@ -353,65 +390,92 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                 )
             ]
 
-    @app.post("/dev/qa/sessions")
-    def create(count: int = Query(default=1, ge=1, le=2), mode: str = "mock"):
-        if mode not in ("mock", "qwen"):
+    @app.post("/dev/qa/sessions", dependencies=[Depends(require_admin)])
+    def create(
+        count: int = Query(default=1, ge=1, le=2),
+        mode: str = "mock",
+        body: dict | None = optional_body,
+    ):
+        body = body or {}
+        if set(body) - {"task_type", "prompt_text", "reference_answer", "group", "grade"}:
+            raise HTTPException(422, "Invalid test task")
+        task_type = body.get("task_type", "qa")
+        if task_type not in ("qa", "repetition") or mode not in ("mock", "qwen", "ise"):
             raise HTTPException(422, "Unknown test mode")
+        if (mode == "qwen" and task_type != "qa") or (mode == "ise" and task_type != "repetition"):
+            raise HTTPException(422, "Mode does not match task type")
+        prompt = body.get("prompt_text", "请跟读这句话。" if task_type == "repetition" else None)
+        reference = body.get(
+            "reference_answer", "今天天气真好。" if task_type == "repetition" else None
+        )
+        if any(
+            value is not None and (not isinstance(value, str) or not value.strip())
+            for value in (prompt, reference)
+        ):
+            raise HTTPException(422, "Invalid test task text")
         registry, plugin_id, plugin_version = REGISTRY, TestPlugin.plugin_id, "1"
         requirements = None
-        config_id = None
-        if mode == "qwen":
-            with Session(engine) as db:
-                config = provider_config.status(db, master_key)
-            if not config.get("configured"):
-                raise HTTPException(409, "Provider configuration unavailable")
-            config_id = config["config_id"]
+        if mode == "qwen" or task_type == "repetition":
             tools = AudioTools()
             spec = AudioSpec(
                 "wav",
                 "pcm_s16le",
                 16000,
                 1,
-                "local-qa-v1",
+                "local-workbench-v2",
                 tools.version(),
                 tools.version(probe=True),
             )
-            requirements = [
-                {
-                    "source": ASR_SOURCE,
-                    "version": ASR_VERSION,
-                    "parameters": {
-                        "model": ASR_MODEL,
-                        "region": config["region"],
-                        "workspace": config["workspace"],
-                        "enable_itn": False,
-                        "language": None,
-                        "audio_spec": asdict(spec),
-                    },
-                },
-                {
-                    "source": LLM_SOURCE,
-                    "version": LLM_VERSION,
-                    "parameters": {
-                        "provider": "dashscope",
-                        "model": "qwen-plus",
-                        "region": config["region"],
-                        "workspace": config["workspace"],
-                        "request_version": "dashscope-chat-json-v1",
-                        "prompt_version": PROMPT_VERSION,
-                        "prompt_sha256": PROMPT_SHA256,
-                        "response_format": "json_object",
-                        "temperature": 0.2,
-                    },
-                    "depends_on": {
-                        "requirement_index": 0,
+            if task_type == "qa":
+                region = os.environ.get("VNEXT_QA_ASR_REGION", "")
+                workspace = os.environ.get("VNEXT_QA_ASR_WORKSPACE", "")
+                requirements = [
+                    {
                         "source": ASR_SOURCE,
                         "version": ASR_VERSION,
+                        "parameters": {
+                            "model": ASR_MODEL,
+                            "region": region,
+                            "workspace": workspace,
+                            "enable_itn": False,
+                            "language": None,
+                            "audio_spec": asdict(spec),
+                        },
                     },
-                },
-            ]
+                    {
+                        "source": LLM_SOURCE,
+                        "version": LLM_VERSION,
+                        "parameters": {
+                            "prompt_version": formal_text.PROMPT_VERSION,
+                            "prompt_sha256": formal_text.PROMPT_SHA256,
+                        },
+                        "depends_on": {
+                            "requirement_index": 0,
+                            "source": ASR_SOURCE,
+                            "version": ASR_VERSION,
+                        },
+                    },
+                ]
+                if not QWEN_ASR_CONTRACT.validate_parameters(requirements[0]["parameters"]):
+                    raise HTTPException(422, "Configure ASR region and workspace")
+            else:
+                params = {
+                    "category": "read_sentence",
+                    "group": body.get("group", "adult"),
+                    "grade": body.get("grade"),
+                    "audio_spec": asdict(spec),
+                }
+                if not ise.valid_parameters(params):
+                    raise HTTPException(422, "Invalid ISE request parameters")
+                requirements = [
+                    {
+                        "source": ise.SOURCE if mode == "ise" else "local-mock-ise",
+                        "version": "1",
+                        "parameters": params,
+                    }
+                ]
             plugin_id, plugin_version = CandidatePlugin.plugin_id, str(uuid4())
-            registry = candidate_registry(plugin_version, requirements)
+            registry = candidate_registry(plugin_version, requirements, task_type)
         with Session(engine) as db, db.begin():
             bank = TaskBank(bank_id=uuid4(), name="本地 QA 测试题库")
             db.add(bank)
@@ -422,16 +486,18 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                 task = append_revision(
                     db,
                     bank_id=bank.bank_id,
-                    task_code=f"qa-{index + 1}",
+                    task_code=f"{task_type}-{index + 1}",
                     display_order=index + 1,
                     content=RevisionContent(
                         grade_level="测试",
-                        task_type="qa",
-                        prompt_text=("小猫在做什么？" if index == 0 else "小狗在做什么？"),
+                        task_type=task_type,
+                        prompt_text=prompt
+                        or ("小猫在做什么？" if index == 0 else "小狗在做什么？"),
                         material_description=(
                             "一只小猫趴在垫子上。" if index == 0 else "一只小狗正在跑。"
                         ),
-                        reference_answer=("小猫在休息。" if index == 0 else "小狗在跑。"),
+                        reference_answer=reference
+                        or ("小猫在休息。" if index == 0 else "小狗在跑。"),
                         scoring_instruction="语义相近的合理回答均可接受。",
                     ),
                     images={},
@@ -464,15 +530,6 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                     "speed": 1,
                 },
             )
-            if requirements is not None:
-                db.execute(
-                    provider_config.paper_configs.insert().values(
-                        paper_id=str(pid),
-                        config_id=config_id,
-                        plugin_version=plugin_version,
-                        requirements=requirements,
-                    )
-                )
         prepare_audio(engine, pid, fixed, Tone())
         with Session(engine) as db, db.begin():
             session = create_session(
@@ -487,7 +544,7 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
             sid = session.session_id
         return {"session_id": str(sid)}
 
-    @app.post("/dev/qa/sessions/{sid}/token")
+    @app.post("/dev/qa/sessions/{sid}/token", dependencies=[Depends(require_admin)])
     def token(sid: UUID):
         with Session(engine) as db:
             owner(db, sid)
@@ -495,7 +552,7 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
             result = issue_access_token(sid, Response(), db=db)
             return {"token": result.token}
 
-    @app.get("/dev/qa/sessions/{sid}/diagnostics")
+    @app.get("/dev/qa/sessions/{sid}/diagnostics", dependencies=[Depends(require_admin)])
     def diagnostics(sid: UUID, task_id: UUID | None = None):
         with Session(engine) as db:
             session_owner = owner(db, sid)
@@ -508,7 +565,7 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                 return {
                     "submission": None,
                     "jobs": [],
-                    "mode": "qwen" if candidate else "mock",
+                    "mode": candidate["mode"] if candidate else "mock",
                     "requirements": candidate["requirements"] if candidate else None,
                     "authorization": None,
                 }
@@ -525,6 +582,11 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                         RawEvaluation.job_id == job.job_id, RawEvaluation.status == "READY"
                     )
                 )
+                failures = db.scalars(
+                    select(RawEvaluation)
+                    .where(RawEvaluation.job_id == job.job_id, RawEvaluation.status != "READY")
+                    .order_by(RawEvaluation.created_at)
+                ).all()
                 output.append(
                     {
                         "job_id": str(job.job_id),
@@ -533,6 +595,21 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                         "attempts": job.attempts,
                         "error": job.error_code,
                         "input_refs": job.input_refs,
+                        "execution_snapshot": job.execution_snapshot,
+                        "diagnostics": [
+                            {
+                                "status": item.status,
+                                "error": item.error_code,
+                                "evidence": diagnostic.evidence
+                                if (
+                                    diagnostic := db.get(
+                                        EvaluationDiagnosticEvidence, item.evaluation_id
+                                    )
+                                )
+                                else None,
+                            }
+                            for item in failures
+                        ],
                         "evidence": None
                         if raw is None
                         else {
@@ -543,25 +620,19 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                         },
                     }
                 )
-            authorization = (
+            permissions = (
                 db.execute(
-                    select(provider_config.authorizations).where(
-                        provider_config.authorizations.c.submission_id == str(sub.submission_id)
+                    select(authorization.authorizations).where(
+                        authorization.authorizations.c.submission_id == str(sub.submission_id)
                     )
                 )
                 .mappings()
-                .one_or_none()
+                .all()
             )
             return {
-                "mode": "qwen" if candidate else "mock",
+                "mode": candidate["mode"] if candidate else "mock",
                 "requirements": candidate["requirements"] if candidate else None,
-                "authorization": None
-                if authorization is None
-                else {
-                    "asr_consumed": authorization["asr_consumed"],
-                    "llm_consumed": authorization["llm_consumed"],
-                    "authorized_at": authorization["authorized_at"],
-                },
+                "authorization": {item["source"]: item["available"] for item in permissions},
                 "submission": {"submission_id": str(sub.submission_id), "status": "ACCEPTED"},
                 "recording": {
                     "recording_id": str(recording.recording_id),
@@ -571,11 +642,12 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                 "jobs": output,
             }
 
-    @app.post("/dev/qa/sessions/{sid}/run-offline")
+    @app.post("/dev/qa/sessions/{sid}/run-offline", dependencies=[Depends(require_admin)])
     def run_offline(sid: UUID, task_id: UUID | None = None):
         with Session(engine) as db, db.begin():
             session_owner = owner(db, sid)
-            if candidate_paper(db, session_owner) is not None:
+            candidate = candidate_paper(db, session_owner)
+            if candidate and candidate["mode"] != "mock-ise":
                 raise HTTPException(409, "Use the separately authorized candidate path")
             task = selected_task(db, sid, task_id)
             sub = db.scalar(
@@ -588,6 +660,7 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
         adapters = {
             ("local-mock-asr", "1"): MockASR(store, derived),
             ("local-mock-llm", "1"): MockLLM(),
+            ("local-mock-ise", "1"): MockISE(),
         }
         with Session(engine) as db:
             ids = list(
@@ -597,15 +670,20 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                     .order_by(EvaluationJob.requirement_index)
                 )
             )
+        registry = (
+            candidate_registry(candidate["plugin_version"], candidate["requirements"], "repetition")
+            if candidate
+            else REGISTRY
+        )
         for job_id in ids:
             claim = claim_job(
-                engine, job_id, registry=REGISTRY, adapters=adapters, lease=timedelta(minutes=5)
+                engine, job_id, registry=registry, adapters=adapters, lease=timedelta(minutes=5)
             )
             if claim:
                 execute_claim(engine, claim)
         return {"mode": "offline-mock"}
 
-    @app.post("/dev/qa/sessions/{sid}/authorize-paid")
+    @app.post("/dev/qa/sessions/{sid}/authorize-paid", dependencies=[Depends(require_admin)])
     def authorize_paid(sid: UUID, body: dict, task_id: UUID | None = None):
         if not paid_enabled:
             raise HTTPException(403, "Paid tests disabled in server configuration")
@@ -613,37 +691,39 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
             type(v) is not bool for v in body.values()
         ):
             raise HTTPException(422, "Explicit paid and audio authorization required")
+        from sqlalchemy.dialects.postgresql import insert
+
         with Session(engine) as db, db.begin():
-            session_owner = owner(db, sid)
-            if candidate_paper(db, session_owner) is None:
-                raise HTTPException(409, "Not a candidate session")
+            candidate = candidate_paper(db, owner(db, sid))
+            if not candidate or candidate["mode"] not in ("qwen", "ise"):
+                raise HTTPException(409, "Not a paid test session")
             task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
             )
             if not sub:
                 raise HTTPException(409, "No current submission")
-            from sqlalchemy.dialects.postgresql import insert
+            sources = [ASR_SOURCE, LLM_SOURCE] if candidate["mode"] == "qwen" else [ise.SOURCE]
+            for source in sources:
+                stmt = insert(authorization.authorizations).values(
+                    submission_id=str(sub.submission_id), source=source, available=True
+                )
+                db.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["submission_id", "source"],
+                        set_={"available": True, "authorized_at": func.now()},
+                    )
+                )
+        return {"status": "authorized", "sources": sources}
 
-            result = db.scalar(
-                insert(provider_config.authorizations)
-                .values(submission_id=str(sub.submission_id))
-                .on_conflict_do_nothing()
-                .returning(provider_config.authorizations.c.submission_id)
-            )
-            if result is None:
-                raise HTTPException(409, "Submission already authorized")
-        return {"status": "authorized", "asr_budget": 1, "llm_budget": 1}
-
-    @app.post("/dev/qa/sessions/{sid}/run-candidate")
+    @app.post("/dev/qa/sessions/{sid}/run-candidate", dependencies=[Depends(require_admin)])
     def run_candidate(sid: UUID, task_id: UUID | None = None):
         if not paid_enabled:
             raise HTTPException(403, "Paid tests disabled in server configuration")
         with Session(engine) as db, db.begin():
-            session_owner = owner(db, sid)
-            candidate = candidate_paper(db, session_owner)
-            if candidate is None:
-                raise HTTPException(409, "Not a candidate session")
+            candidate = candidate_paper(db, owner(db, sid))
+            if not candidate or candidate["mode"] not in ("qwen", "ise"):
+                raise HTTPException(409, "Not a paid test session")
             task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
@@ -651,49 +731,31 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
             if sub is None:
                 raise HTTPException(409, "No current submission")
             submission_id = sub.submission_id
-            permission = db.execute(
-                select(provider_config.authorizations).where(
-                    provider_config.authorizations.c.submission_id == str(submission_id)
+            permission = db.scalar(
+                select(authorization.authorizations.c.submission_id)
+                .where(
+                    authorization.authorizations.c.submission_id == str(submission_id),
+                    authorization.authorizations.c.available.is_(True),
                 )
-            ).one_or_none()
+                .limit(1)
+            )
             if permission is None:
                 raise HTTPException(403, "Explicit authorization required")
-            config = (
-                db.execute(
-                    select(provider_config.configs).where(
-                        provider_config.configs.c.id == candidate["config_id"]
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            credential_id = config["credential_id"]
-            requirements = candidate["requirements"]
-            version = candidate["plugin_version"]
             schedule(db, submission_id=submission_id)
-
-        def credential():
-            with Session(engine) as db:
-                return provider_config.resolve(db, master_key, credential_id, "dashscope")
-
-        if client_factory is None:
-            import dashscope
-            import httpx
-
-            def factory(**kwargs):
-                return dashscope.Client(**kwargs, http_client=httpx.Client(trust_env=False))
-        else:
-            factory = client_factory
         tools = AudioTools()
         adapters = {
             (ASR_SOURCE, ASR_VERSION): DashScopeASR(
-                store, derived, tools, client_factory=factory, credential_provider=credential
+                store, derived, tools, client_factory=client_factory
             ),
-            (LLM_SOURCE, LLM_VERSION): QwenQAText(
-                client_factory=factory, credential_provider=credential
+            (LLM_SOURCE, LLM_VERSION): DynamicQAText(client_factories=text_client_factories),
+            (ise.SOURCE, ise.VERSION): ise.IseRepetition(
+                store, derived, tools, websocket_factory=ise_socket_factory
             ),
         }
-        registry = candidate_registry(version, requirements)
+        task_type = "repetition" if candidate["mode"] == "ise" else "qa"
+        registry = candidate_registry(
+            candidate["plugin_version"], candidate["requirements"], task_type
+        )
         with Session(engine) as db:
             jobs = [
                 (row.job_id, row.requirement["source"])
@@ -704,47 +766,78 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
                 ).all()
             ]
         for job_id, source in jobs:
-            if source not in (ASR_SOURCE, LLM_SOURCE):
-                continue
-            column = (
-                provider_config.authorizations.c.asr_consumed
-                if source == ASR_SOURCE
-                else provider_config.authorizations.c.llm_consumed
-            )
-            with Session(engine) as db:
-                if db.scalar(
-                    select(column).where(
-                        provider_config.authorizations.c.submission_id == str(submission_id)
+            if source == LLM_SOURCE:
+                with Session(engine) as db:
+                    asr_status = db.scalar(
+                        select(EvaluationJob.status).where(
+                            EvaluationJob.submission_id == submission_id,
+                            EvaluationJob.requirement["source"].astext == ASR_SOURCE,
+                        )
                     )
-                ):
+                if asr_status != "READY":
                     continue
-            claim = claim_job(
-                engine, job_id, registry=registry, adapters=adapters, lease=timedelta(minutes=20)
-            )
-            if claim is None:
-                continue
             with Session(engine) as db, db.begin():
                 consumed = db.scalar(
-                    update(provider_config.authorizations)
+                    update(authorization.authorizations)
                     .where(
-                        provider_config.authorizations.c.submission_id == str(submission_id),
-                        column.is_(False),
+                        authorization.authorizations.c.submission_id == str(submission_id),
+                        authorization.authorizations.c.source == source,
+                        authorization.authorizations.c.available.is_(True),
                     )
-                    .values({column.name: True})
-                    .returning(provider_config.authorizations.c.submission_id)
+                    .values(available=False)
+                    .returning(authorization.authorizations.c.submission_id)
                 )
-            if consumed:
+            if not consumed:
+                continue
+            claim = claim_job(
+                engine,
+                job_id,
+                registry=registry,
+                adapters=adapters,
+                lease=timedelta(minutes=20),
+                recording_store=store,
+                derived_recording_store=derived,
+            )
+            if claim:
                 execute_claim(engine, claim)
-        return {"mode": "qwen-candidate"}
+        return {"mode": candidate["mode"]}
 
-    @app.post("/dev/qa/sessions/{sid}/jobs/{job_id}/retry")
+    @app.get("/dev/qa/ise-status", dependencies=[Depends(require_admin)])
+    def ise_status():
+        keys = ("IFLYTEK_ISE_APP_ID", "IFLYTEK_ISE_API_KEY", "IFLYTEK_ISE_API_SECRET")
+        configured = {key: bool(os.environ.get(key, "").strip()) for key in keys}
+        with Session(engine) as db:
+            latest = db.execute(
+                select(RawEvaluation.status, RawEvaluation.error_code, RawEvaluation.created_at)
+                .join(EvaluationJob, EvaluationJob.job_id == RawEvaluation.job_id)
+                .join(Submission, Submission.submission_id == EvaluationJob.submission_id)
+                .join(SessionTask, SessionTask.session_task_id == Submission.session_task_id)
+                .join(AssessmentSession, AssessmentSession.session_id == SessionTask.session_id)
+                .where(
+                    AssessmentSession.scope == SCOPE,
+                    EvaluationJob.requirement["source"].astext == ise.SOURCE,
+                )
+                .order_by(RawEvaluation.created_at.desc())
+                .limit(1)
+            ).first()
+        return {
+            "fields": configured,
+            "configured": all(configured.values()),
+            "last_call": {
+                "status": latest.status,
+                "error": latest.error_code,
+                "at": latest.created_at,
+            }
+            if latest
+            else None,
+        }
+
+    @app.post("/dev/qa/sessions/{sid}/jobs/{job_id}/retry", dependencies=[Depends(require_admin)])
     def retry(sid: UUID, job_id: UUID, body: dict, task_id: UUID | None = None):
         if set(body) != {"accept_unknown"} or type(body["accept_unknown"]) is not bool:
             raise HTTPException(422, "Explicit retry acknowledgment required")
         with Session(engine) as db, db.begin():
-            session_owner = owner(db, sid)
-            if candidate_paper(db, session_owner) is not None:
-                raise HTTPException(409, "Candidate test budgets do not permit retry")
+            owner(db, sid)
             task = selected_task(db, sid, task_id)
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
@@ -764,46 +857,8 @@ def create_app(engine, data_root, *, paid_enabled=False, client_factory=None, ma
 def main():
     import uvicorn
 
-    config = dotenv_values(ROOT / "backend" / ".env")
-    key_dir = Path.home() / ".codex" / "vnext-qa-private"
-    key_path = key_dir / "provider.key"
-    if sys.argv[1:] == ["--generate-provider-key"]:
-        if (
-            key_path.exists()
-            or config.get("VNEXT_PROVIDER_CREDENTIAL_KEY")
-            or os.environ.get("VNEXT_PROVIDER_CREDENTIAL_KEY")
-        ):
-            raise SystemExit("Provider key already exists; refusing to replace it")
-        from cryptography.fernet import Fernet
-
-        if key_dir.is_symlink():
-            raise SystemExit("Unsafe private key directory")
-        key_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if os.name == "nt":
-            account = os.environ.get("USERDOMAIN", "") + "\\" + os.environ.get("USERNAME", "")
-            if account == "\\":
-                raise SystemExit("Cannot establish private key permissions")
-            subprocess.run(
-                [
-                    "icacls",
-                    str(key_dir),
-                    "/inheritance:r",
-                    "/grant:r",
-                    account + ":(OI)(CI)F",
-                    "*S-1-5-18:(OI)(CI)F",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            key_dir.chmod(0o700)
-        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as private_file:
-            private_file.write(Fernet.generate_key())
-        print("Provider master key saved in private configuration")
-        return
-    url = make_url(config.get("TEST_DATABASE_URL") or "")
+    load_dotenv(ROOT / "backend" / ".env")
+    url = make_url(os.environ.get("TEST_DATABASE_URL") or "")
     if (
         url.drivername != "postgresql+psycopg"
         or url.database != "vnext_eval02e_test"
@@ -837,17 +892,13 @@ def main():
             conn.commit()
         return
     if sys.argv[1:]:
-        raise SystemExit("Usage: workbench.py [--migrate|--generate-provider-key]")
+        raise SystemExit("Usage: workbench.py [--migrate]")
     data_root = ROOT / "uploads" / "local-qa-workbench"
-    master_key = os.environ.get("VNEXT_PROVIDER_CREDENTIAL_KEY")
-    if master_key is None and key_path.is_file() and not key_path.is_symlink():
-        master_key = key_path.read_text(encoding="ascii").strip()
     uvicorn.run(
         create_app(
             engine,
             data_root,
             paid_enabled=os.environ.get("VNEXT_QA_PAID_TESTS") == "enabled",
-            master_key=master_key,
         ),
         host="127.0.0.1",
         port=8000,
