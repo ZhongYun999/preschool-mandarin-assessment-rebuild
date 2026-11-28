@@ -283,6 +283,13 @@ def test_ise_workbench_explicit_authorization_and_rejection_history(db, tmp_path
         )
         assert client.post(root + "/run-candidate" + query).status_code == 200
         diag = client.get(root + "/diagnostics" + query).json()
+        assert diag["frozen_task"] == {
+            "task_type": "repetition",
+            "prompt_text": "请跟读测试。",
+            "reference_answer": "今天天气很好。",
+            "ise_group": "adult",
+            "ise_grade": None,
+        }
         assert diag["jobs"][0]["status"] == "FAILED" and diag["jobs"][0]["error"] == "ISE_REJECTED"
         assert diag["jobs"][0]["diagnostics"][0]["evidence"]["xml"] == xml
         assert calls == ["ise"]

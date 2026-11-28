@@ -49,6 +49,7 @@ async function refresh() {
  $('state').textContent=JSON.stringify({task, recordings:recs.map(r=>({...r,browser_declared_mime:localStorage.getItem(key(`mime:${r.recording_id}`))})), playbacks:plays},null,2);
  $('prompt').textContent=content.prompt_text;
  const diagnostic=await api(`/dev/qa/sessions/${sid}/diagnostics${taskQuery()}`); jobs=diagnostic.jobs;
+ const frozen=diagnostic.frozen_task; $('frozenTask').textContent=`题型：${frozen.task_type}\n冻结题干：${frozen.prompt_text}\n冻结参考文本：${frozen.reference_answer ?? '未设置'}\nISE group：${frozen.ise_group ?? '不适用'}\nISE grade：${frozen.ise_grade ?? '未设置'}`;
  currentMode=diagnostic.mode; $('run').disabled=!['mock','mock-ise'].includes(currentMode); $('authorizePaid').disabled=!['qwen','ise'].includes(currentMode); $('runPaid').disabled=!['qwen','ise'].includes(currentMode);
  $('diagnostics').textContent=JSON.stringify(diagnostic,null,2);
  $('jobs').replaceChildren(...jobs.filter(j=>['FAILED','INVALID','UNKNOWN'].includes(j.status)).map(j=>{const o=document.createElement('option'); o.value=j.job_id; o.textContent=`${j.source}: ${j.status}`; return o;}));

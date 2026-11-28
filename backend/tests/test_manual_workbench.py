@@ -4,12 +4,22 @@ import shutil
 import subprocess
 import wave
 from pathlib import Path
+from typing import Annotated
+from uuid import UUID
 
 import pytest
 from auth_helpers import prepare_admin
+from cryptography.fernet import Fernet
+from fastapi import Depends
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
+from app.api.db import get_auth_db, get_db
+from app.api.teacher_auth import require_admin
 from app.main import app as production_app
+from app.papers.paper import PaperEntry
+from app.sessions.assessment_session import SessionTask
+from app.taskbank.models import RevisionContent, TaskIdentity, TaskRevision, append_revision
 
 spec = importlib.util.spec_from_file_location(
     "qa_workbench", Path(__file__).parent / "manual" / "workbench.py"
@@ -30,6 +40,96 @@ def login_admin(client):
     )
     assert response.status_code == 200
     client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+
+
+@pytest.mark.db_isolated
+def test_workbench_separates_auth_and_business_sessions(db, tmp_path, monkeypatch):
+    prepare_login(db, monkeypatch)
+    monkeypatch.setenv("VNEXT_LLM_PROVIDER_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    app = workbench.create_app(db, tmp_path)
+
+    @app.get("/test-session-dependencies", dependencies=[Depends(require_admin)])
+    def inspect_dependencies(
+        business: Annotated[Session, Depends(get_db)], auth: Annotated[Session, Depends(get_auth_db)]
+    ):
+        return {"distinct": business is not auth, "same_engine": business.bind is auth.bind is db}
+
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        client=("127.0.0.1", 12345),
+        headers={"Origin": "http://127.0.0.1:8000"},
+    ) as client:
+        assert client.get("/test-session-dependencies").status_code == 401
+        login_admin(client)
+        assert client.get("/test-session-dependencies").json() == {
+            "distinct": True,
+            "same_engine": True,
+        }
+        assert client.get("/teacher/llm-provider").status_code == 200
+        response = client.put(
+            "/teacher/llm-provider",
+            json={"provider": "deepseek", "model": "deepseek-flash", "api_key": "test-key"},
+        )
+        assert response.status_code == 200, response.text
+        assert client.get("/teacher/llm-provider").json()["provider"] == "deepseek"
+
+
+@pytest.mark.db_isolated
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"task_type": "repetition"}, ("请跟读这句话。", "今天天气真好。", "adult", None)),
+        (
+            {"task_type": "repetition", "prompt_text": "冻结题干", "reference_answer": "冻结答案",
+             "group": "pupil", "grade": "junior"},
+            ("冻结题干", "冻结答案", "pupil", "junior"),
+        ),
+    ],
+)
+def test_workbench_displays_frozen_repetition(db, tmp_path, monkeypatch, body, expected):
+    prepare_login(db, monkeypatch)
+    app = workbench.create_app(db, tmp_path)
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        client=("127.0.0.1", 12345),
+        headers={"Origin": "http://127.0.0.1:8000"},
+    ) as client:
+        login_admin(client)
+        sid = client.post("/dev/qa/sessions", json=body).json()["session_id"]
+        token = client.post(f"/dev/qa/sessions/{sid}/token").json()["token"]
+        auth = {"Authorization": "Bearer " + token}
+        root = f"/assessment/sessions/{sid}"
+        tid = client.get(root, headers=auth).json()["tasks"][0]["session_task_id"]
+        with Session(db) as session, session.begin():
+            task = session.get(SessionTask, UUID(tid))
+            entry = session.get(PaperEntry, task.paper_entry_id)
+            revision = session.get(TaskRevision, entry.task_revision_id)
+            identity = session.get(TaskIdentity, revision.task_id)
+            append_revision(
+                session,
+                bank_id=identity.bank_id,
+                task_code=identity.task_code,
+                display_order=identity.display_order,
+                content=RevisionContent(
+                    grade_level="测试", task_type="repetition", prompt_text="新修订题干",
+                    reference_answer="新修订答案",
+                ),
+                images={},
+            )
+        diagnostic = client.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={tid}")
+        assert diagnostic.status_code == 200
+        prompt, reference, group, grade = expected
+        assert diagnostic.json()["frozen_task"] == {
+            "task_type": "repetition", "prompt_text": prompt, "reference_answer": reference,
+            "ise_group": group, "ise_grade": grade,
+        }
+        content = client.get(f"{root}/tasks/{tid}/content", headers=auth).json()
+        assert content["prompt_text"] == prompt
+        assert "reference_answer" not in content and "scoring_instruction" not in content
+        client.cookies.clear()
+        assert client.get(f"/dev/qa/sessions/{sid}/diagnostics?task_id={tid}", headers=auth).status_code == 401
 
 
 @pytest.mark.parametrize("media_type", ["audio/wav", "audio/webm"])

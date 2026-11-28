@@ -63,7 +63,7 @@ from app.papers.publication import publish, select_plugin
 from app.scoring.registry import QWEN_ASR_CONTRACT, EvaluationContract, Registry
 from app.sessions.assessment_session import AssessmentSession, SessionTask, create_session
 from app.sessions.submission import Submission
-from app.taskbank.models import RevisionContent, TaskBank, append_revision
+from app.taskbank.models import RevisionContent, TaskBank, TaskRevision, append_revision
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -295,12 +295,16 @@ def create_app(
     derived = RecordingStore(data_root / "derived")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
-    def db_dependency():
+    def business_db_dependency():
         with Session(engine) as db:
             yield db
 
-    app.dependency_overrides[get_db] = db_dependency
-    app.dependency_overrides[get_auth_db] = db_dependency
+    def auth_db_dependency():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[get_db] = business_db_dependency
+    app.dependency_overrides[get_auth_db] = auth_db_dependency
     app.dependency_overrides[get_audio_store] = lambda: fixed
     app.dependency_overrides[get_recording_store] = lambda: store
     app.include_router(authentication)
@@ -558,11 +562,31 @@ def create_app(
             session_owner = owner(db, sid)
             candidate = candidate_paper(db, session_owner)
             task = selected_task(db, sid, task_id)
+            entry = db.get(PaperEntry, task.paper_entry_id)
+            revision = db.get(TaskRevision, entry.task_revision_id)
+            plan = db.get(EvaluationPlan, task.paper_entry_id)
+            ise_requirement = next(
+                (
+                    item
+                    for item in plan.requirements
+                    if item["source"] in (ise.SOURCE, "local-mock-ise")
+                ),
+                None,
+            )
+            parameters = ise_requirement["parameters"] if ise_requirement else {}
+            frozen_task = {
+                "task_type": revision.task_type,
+                "prompt_text": revision.prompt_text,
+                "reference_answer": revision.reference_answer,
+                "ise_group": parameters.get("group"),
+                "ise_grade": parameters.get("grade"),
+            }
             sub = db.scalar(
                 select(Submission).where(Submission.attempt_id == task.current_attempt_id)
             )
             if not sub:
                 return {
+                    "frozen_task": frozen_task,
                     "submission": None,
                     "jobs": [],
                     "mode": candidate["mode"] if candidate else "mock",
@@ -630,6 +654,7 @@ def create_app(
                 .all()
             )
             return {
+                "frozen_task": frozen_task,
                 "mode": candidate["mode"] if candidate else "mock",
                 "requirements": candidate["requirements"] if candidate else None,
                 "authorization": {item["source"]: item["available"] for item in permissions},
