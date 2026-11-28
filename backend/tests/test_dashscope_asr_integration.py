@@ -17,9 +17,9 @@ from test_dashscope_asr import body
 
 from app.evaluation.asr_contract import MODEL, SOURCE, VERSION
 from app.evaluation.dashscope_asr import DashScopeASR
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.worker import (
-    InputIdentityConflict,
     claim_job,
     execute_claim,
     recover_expired,
@@ -227,7 +227,9 @@ def test_late_asr_after_redo_cannot_contaminate_result(db, client, flow):
             task_url = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
             assert (
                 client.post(
-                    task_url + "/redo", headers=f["headers"], json={"redo_request_id": "new"}
+                    task_url + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "new", "expected_attempt_id": f["attempt_id"]},
                 ).status_code
                 == 200
             )

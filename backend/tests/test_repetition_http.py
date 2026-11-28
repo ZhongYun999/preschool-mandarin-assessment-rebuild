@@ -280,7 +280,11 @@ def test_redo_isolates_old_recording_and_close(db, client, repetition):
     assert upload(client, f, aid, rid).status_code == 200
     old = submit_http(client, f, aid, rid).json()["submission_id"]
     base = task_base(f)
-    redo = client.post(base + "/redo", headers=f["headers"], json={"redo_request_id": "redo"})
+    redo = client.post(
+        base + "/redo",
+        headers=f["headers"],
+        json={"redo_request_id": "redo", "expected_attempt_id": aid},
+    )
     new = redo.json()["attempt_id"]
     assert upload(client, f, aid, rid).status_code == 409
     assert submit_http(client, f, new, rid, request="new").status_code == 409
@@ -350,7 +354,9 @@ def test_late_upload_is_rejected(db, client, repetition, monkeypatch, interrupt)
             assert entered.wait(10)
             if interrupt == "redo":
                 result = client.post(
-                    task_base(f) + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                    task_base(f) + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "redo", "expected_attempt_id": aid},
                 )
             else:
                 result = client.post(
@@ -457,6 +463,7 @@ def test_repetition_evaluation_and_formal_result(db, client, repetition, require
     assert client.get(f"/teacher/sessions/{f['sid']}/result", headers=AUTH).json()["ready"]
 
 
+@pytest.mark.db_isolated
 def test_database_recording_history_is_immutable(db, client, repetition):
     from pathlib import Path
 
@@ -565,7 +572,9 @@ def test_recorded_submission_and_close_compete(
             return submit_http(client, f, *ids[1], index=1)
         if action == "redo":
             return client.post(
-                task_base(f, 1) + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                task_base(f, 1) + "/redo",
+                headers=f["headers"],
+                json={"redo_request_id": "redo", "expected_attempt_id": ids[1][0]},
             )
         return client.post(
             f["root"] + "/close", headers=f["headers"], json={"close_request_id": "close"}

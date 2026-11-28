@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,7 +6,6 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -19,12 +17,9 @@ from app.papers.paper import EvaluationPlan, copy_paper
 from app.papers.publication import publish
 
 
-def test_postgres_connection_and_migration_cycle(monkeypatch):
-    load_dotenv()
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        pytest.fail("TEST_DATABASE_URL must point to a disposable PostgreSQL test database")
-    monkeypatch.setenv("DATABASE_URL", url)
+@pytest.mark.db_isolated
+def test_postgres_connection_and_migration_cycle(monkeypatch, _test_database_url):
+    monkeypatch.setenv("DATABASE_URL", _test_database_url)
     engine = create_database_engine()
     schema = "test_" + uuid4().hex
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -38,7 +33,8 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0027_auth_users_sessions"
             )
             connection.commit()
             assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
@@ -58,7 +54,8 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
             command.upgrade(config, "head")
             assert connection.scalar(functions) == 12
             assert (
-                connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0027_auth_users_sessions"
             )
             connection.commit()
     finally:
@@ -67,6 +64,7 @@ def test_postgres_connection_and_migration_cycle(monkeypatch):
         engine.dispose()
 
 
+@pytest.mark.db_isolated
 def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as connection:
@@ -91,6 +89,7 @@ def test_migration_refuses_unreconciled_legacy_published_paper(db, bank):
         )
 
 
+@pytest.mark.db_isolated
 @pytest.mark.parametrize("scenario", ["published", "archived", "copied_draft", "published_empty"])
 def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
     paper_id, task, _, entry_id, _ = setup_paper(db, bank)
@@ -154,4 +153,7 @@ def test_downgrade_refuses_to_discard_contracts(db, bank, scenario):
             command.downgrade(config, "0004_paper_drafts")
         connection.rollback()
         assert [connection.execute(text(query)).all() for query in queries] == before
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            == "0027_auth_users_sessions"
+        )

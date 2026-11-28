@@ -2,12 +2,14 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from auth_helpers import AUTH, prepare_admin
 from dashscope import errors
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_fixed_audio import Synth, published, wav
 
+from app.api.db import get_auth_db
 from app.api.teacher_api import get_audio_store, get_db
 from app.main import app
 from app.media.dashscope_tts import DashScopeSynthesizer, TTSError
@@ -24,7 +26,6 @@ CONFIG = {
     "format": "wav",
     "sample_rate": 8000,
 }
-AUTH = {"Authorization": "Bearer test-token"}
 
 
 def test_sdk_mapping_and_audio_validation(monkeypatch):
@@ -143,14 +144,14 @@ def test_teacher_status_trigger_retry_and_preview(db, bank, tmp_path, monkeypatc
         audio_id = s.scalar(select(FixedAudio.audio_id))
         s.add(TTSAttempt(audio_id=audio_id, state="SENDING"))
     run_audio(db, audio_id, store, Synth())
-    monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token")
-    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
+    prepare_admin(db)
 
     def override_db():
         with Session(db) as s:
             yield s
 
     app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_auth_db] = override_db
     app.dependency_overrides[get_audio_store] = lambda: store
     try:
         with TestClient(app) as client:
@@ -185,7 +186,7 @@ def test_teacher_status_trigger_retry_and_preview(db, bank, tmp_path, monkeypatc
             report = client.get(path, headers=AUTH).json()
             assert any(row["diagnostic"] == "file_missing" for row in report["items"])
             assert client.get(f"{path}/{audio_id}/content", headers=AUTH).status_code == 409
-            monkeypatch.delenv("TEACHER_MANAGEMENT_TOKEN")
-            assert client.get(path, headers=AUTH).status_code == 503
+            monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token")
+            assert client.get(path, headers={"Authorization": "Bearer test-token"}).status_code == 401
     finally:
         app.dependency_overrides.clear()

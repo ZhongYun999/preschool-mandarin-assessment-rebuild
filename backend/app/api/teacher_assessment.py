@@ -9,10 +9,11 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.api.teacher_api import get_audio_store, get_db
-from app.api.teacher_auth import require_teacher
+from app.api.teacher_auth import require_admin, require_teacher
 from app.api.teacher_review import get_scoring_registry
 from app.media.fixed_audio import AudioStore
 from app.papers.paper import Paper, PaperEntry
@@ -20,12 +21,46 @@ from app.scoring.registry import Registry
 from app.scoring.review_policy import PolicyUndetermined, validate_policy
 from app.sessions.assessment_session import AssessmentSession, create_session
 from app.sessions.credentials import SessionCredential
+from app.task_types.speaking import SpeakingPolicy
 
 router = APIRouter(prefix="/teacher/assessment", dependencies=[Depends(require_teacher)])
 db_dependency = Depends(get_db)
 audio_dependency = Depends(get_audio_store)
 registry_dependency = Depends(get_scoring_registry)
 _MANAGEMENT_SCOPE = "teacher-management"
+
+
+class SpeakingPolicyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    minimum_duration_seconds: float = Field(gt=0, allow_inf_nan=False, strict=True)
+
+
+@router.put("/speaking-policy", dependencies=[Depends(require_admin)])
+def set_speaking_policy(body: SpeakingPolicyInput, db: Session = db_dependency):
+    with db.begin():
+        stmt = insert(SpeakingPolicy).values(
+            policy_id=1, minimum_duration_seconds=body.minimum_duration_seconds, revision=1
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[SpeakingPolicy.policy_id],
+            set_={
+                "minimum_duration_seconds": stmt.excluded.minimum_duration_seconds,
+                "revision": SpeakingPolicy.revision + 1,
+            },
+        ).returning(SpeakingPolicy.minimum_duration_seconds, SpeakingPolicy.revision)
+        row = db.execute(stmt).one()
+        return {"minimum_duration_seconds": row.minimum_duration_seconds, "revision": row.revision}
+
+
+@router.get("/speaking-policy", dependencies=[Depends(require_admin)])
+def get_speaking_policy(db: Session = db_dependency):
+    policy = db.get(SpeakingPolicy, 1)
+    if policy is None:
+        raise HTTPException(404, "Speaking policy is not configured")
+    return {
+        "minimum_duration_seconds": policy.minimum_duration_seconds,
+        "revision": policy.revision,
+    }
 
 
 def _same_json_value(left, right):

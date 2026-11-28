@@ -184,12 +184,20 @@ def test_attempt_restore_redo_sealed_and_rollback(db, ready):
         assert start_attempt(s, session_id=session_id, session_task_id=task_id).attempt_id == a
     with Session(db) as s, s.begin():
         b = redo_attempt(
-            s, session_id=session_id, session_task_id=task_id, redo_request_id="b"
+            s,
+            session_id=session_id,
+            session_task_id=task_id,
+            redo_request_id="b",
+            expected_attempt_id=a,
         ).attempt_id
         assert s.get(Attempt, a).status == "ABANDONED"
         assert (
             redo_attempt(
-                s, session_id=session_id, session_task_id=task_id, redo_request_id="b"
+                s,
+                session_id=session_id,
+                session_task_id=task_id,
+                redo_request_id="b",
+                expected_attempt_id=a,
             ).attempt_id
             == b
         )
@@ -205,21 +213,33 @@ def test_attempt_restore_redo_sealed_and_rollback(db, ready):
         c.execute(text("UPDATE attempts SET status='SEALED' WHERE attempt_id=:id"), {"id": b})
     with Session(db) as s, s.begin():
         c_id = redo_attempt(
-            s, session_id=session_id, session_task_id=task_id, redo_request_id="c"
+            s,
+            session_id=session_id,
+            session_task_id=task_id,
+            redo_request_id="c",
+            expected_attempt_id=b,
         ).attempt_id
         assert s.get(Attempt, b).status == "SEALED"
         assert s.get(SessionTask, task_id).current_attempt_id == c_id
         assert s.get(Attempt, c_id).status == "OPEN"
         assert (
             redo_attempt(
-                s, session_id=session_id, session_task_id=task_id, redo_request_id="b"
+                s,
+                session_id=session_id,
+                session_task_id=task_id,
+                redo_request_id="b",
+                expected_attempt_id=a,
             ).attempt_id
             == b
         )
         assert s.get(SessionTask, task_id).current_attempt_id == c_id
     with pytest.raises(RuntimeError), Session(db) as s, s.begin():
         redo_attempt(
-            s, session_id=session_id, session_task_id=task_id, redo_request_id="rolled-back"
+            s,
+            session_id=session_id,
+            session_task_id=task_id,
+            redo_request_id="rolled-back",
+            expected_attempt_id=c_id,
         )
         raise RuntimeError("interrupt")
     with Session(db) as s:
@@ -234,7 +254,11 @@ def test_attempt_restore_redo_sealed_and_rollback(db, ready):
     for fn in (
         lambda s: start_attempt(s, session_id=session_id, session_task_id=task_id),
         lambda s: redo_attempt(
-            s, session_id=session_id, session_task_id=task_id, redo_request_id="d"
+            s,
+            session_id=session_id,
+            session_task_id=task_id,
+            redo_request_id="d",
+            expected_attempt_id=c_id,
         ),
     ):
         with pytest.raises(ValueError, match="not in progress"), Session(db) as s, s.begin():
@@ -281,22 +305,32 @@ def test_concurrent_create_and_redo(db, ready):
     barrier = Barrier(2)
 
     def redo(key):
-        with Session(db) as s, s.begin():
-            barrier.wait(timeout=10)
-            return redo_attempt(
-                s, session_id=ids[0], session_task_id=task_id, redo_request_id=key
-            ).attempt_id
+        try:
+            with Session(db) as s, s.begin():
+                barrier.wait(timeout=10)
+                return redo_attempt(
+                    s,
+                    session_id=ids[0],
+                    session_task_id=task_id,
+                    redo_request_id=key,
+                    expected_attempt_id=None,
+                ).attempt_id
+        except ValueError as exc:
+            assert str(exc) == "Expected attempt is no longer current"
+            return None
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(redo, ["one", "two"]))
     with Session(db) as s:
         attempts = s.scalars(select(Attempt).where(Attempt.session_task_id == task_id)).all()
-        assert len(attempts) == 2
-        assert {a.status for a in attempts} == {"OPEN", "ABANDONED"}
+        assert len(attempts) == 1
+        assert {a.status for a in attempts} == {"OPEN"}
+        assert results.count(None) == 1
         current = s.get(SessionTask, task_id).current_attempt_id
         assert current in results and s.get(Attempt, current).status == "OPEN"
 
 
+@pytest.mark.db_isolated
 def test_downgrade_rejects_existing_data(db, ready):
     created(db, ready)
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -306,7 +340,7 @@ def test_downgrade_rejects_existing_data(db, ready):
             command.downgrade(config, "0007_tts_attempts")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM assessment_sessions")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0027_auth_users_sessions"
 
 
 def test_concurrent_start_and_same_redo_are_idempotent(db, ready):
@@ -321,13 +355,18 @@ def test_concurrent_start_and_same_redo_are_idempotent(db, ready):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(start, range(2)))
     assert results[0] == results[1]
+    original_attempt = results[0]
     barrier = Barrier(2)
 
     def redo(_):
         with Session(db) as s, s.begin():
             barrier.wait(timeout=10)
             return redo_attempt(
-                s, session_id=session_id, session_task_id=task_id, redo_request_id="same"
+                s,
+                session_id=session_id,
+                session_task_id=task_id,
+                redo_request_id="same",
+                expected_attempt_id=original_attempt,
             ).attempt_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -336,6 +375,38 @@ def test_concurrent_start_and_same_redo_are_idempotent(db, ready):
     with Session(db) as s:
         assert s.scalar(select(func.count()).select_from(Attempt)) == 2
         assert s.get(SessionTask, task_id).current_attempt_id == results[0]
+
+
+def test_distinct_concurrent_redos_of_same_attempt_reject_stale_request(db, ready):
+    session_id, (task_id, _) = created(db, ready)
+    with Session(db) as s, s.begin():
+        original = start_attempt(s, session_id=session_id, session_task_id=task_id).attempt_id
+    barrier = Barrier(2)
+
+    def redo(key):
+        try:
+            with Session(db) as s, s.begin():
+                barrier.wait(timeout=10)
+                return redo_attempt(
+                    s,
+                    session_id=session_id,
+                    session_task_id=task_id,
+                    redo_request_id=key,
+                    expected_attempt_id=original,
+                ).attempt_id
+        except ValueError as exc:
+            assert str(exc) == "Expected attempt is no longer current"
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(redo, ["one", "two"]))
+    assert results.count(None) == 1
+    winner = next(value for value in results if value is not None)
+    with Session(db) as s:
+        assert s.scalar(select(func.count()).select_from(Attempt)) == 2
+        assert s.get(Attempt, original).status == "ABANDONED"
+        assert s.get(SessionTask, task_id).current_attempt_id == winner
+        assert s.get(Attempt, winner).status == "OPEN"
 
 
 def test_creation_serializes_with_paper_archive(db, ready):

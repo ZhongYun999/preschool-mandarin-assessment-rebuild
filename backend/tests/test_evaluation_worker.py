@@ -348,6 +348,7 @@ def test_old_results_stay_with_original_submission_after_redo_and_close(db, cont
                     s,
                     session_id=context["session_id"],
                     session_task_id=context["session_task_id"],
+                    expected_attempt_id=context["attempt_id"],
                     redo_request_id="redo",
                 ).attempt_id
             newer = dict(context, attempt_id=new_attempt)
@@ -380,6 +381,7 @@ def test_old_results_stay_with_original_submission_after_redo_and_close(db, cont
         assert s.get(Submission, old_submission).attempt_id == context["attempt_id"]
 
 
+@pytest.mark.db_isolated
 def test_downgrade_refuses_existing_evidence(db, context):
     _, job_id = prepare(db, context)
     assert execute_claim(db, claim(db, job_id, FakeAdapter()))
@@ -390,7 +392,7 @@ def test_downgrade_refuses_existing_evidence(db, context):
             command.downgrade(config, "0011_session_task_identity")
         c.rollback()
         assert c.scalar(text("SELECT count(*) FROM raw_evaluations")) == 1
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0027_auth_users_sessions"
 
 
 def test_retry_rejects_changed_resolved_input_identity(db, context):

@@ -46,6 +46,7 @@ def record_review(
     action: str,
     override_value=None,
     registry: Registry = PRODUCTION_REGISTRY,
+    reviewer_user_id: UUID | None = None,
 ) -> ReviewDecision:
     """Record one decision; plugins may implement apply_override(context, automatic, value).
 
@@ -87,11 +88,17 @@ def record_review(
             prior.session_task_id,
             prior.submission_id,
             prior.teacher_id,
+            prior.reviewer_user_id,
             prior.action,
             prior.revision - 1,
-        ) != (session_task_id, submission_id, teacher_id, action, expected_revision) or json.dumps(
-            prior.override_value, sort_keys=True
-        ) != json.dumps(value, sort_keys=True):
+        ) != (
+            session_task_id,
+            submission_id,
+            teacher_id,
+            reviewer_user_id,
+            action,
+            expected_revision,
+        ) or json.dumps(prior.override_value, sort_keys=True) != json.dumps(value, sort_keys=True):
             raise ReviewConflict("Review operation conflicts with existing request")
         return prior
     if owner.status != "INPUT_CLOSED":
@@ -208,6 +215,7 @@ def record_review(
         revision=revision + 1,
         operation_id=operation_id,
         teacher_id=teacher_id,
+        reviewer_user_id=reviewer_user_id,
         action=action,
         override_value=value,
         effective_result=effective_result,

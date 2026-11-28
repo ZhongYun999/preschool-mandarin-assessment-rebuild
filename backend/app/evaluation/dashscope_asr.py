@@ -6,7 +6,8 @@ import re
 from dataclasses import asdict
 
 from app.evaluation.asr_contract import MODEL, SOURCE, VERSION, recognition_result, valid_parameters
-from app.evaluation.worker import AdapterResult, InputSnapshot, KnownFailure, recording_input
+from app.evaluation.source_identity import recording_input
+from app.evaluation.worker import AdapterResult, InputSnapshot, KnownFailure
 from app.media.audio_inspection import AudioError, AudioTools
 from app.media.audio_normalization import AudioSpec, prepare_audio
 from app.media.recording_store import RecordingStore

@@ -1,11 +1,17 @@
 from alembic import context
 
+from app.auth import models as auth_models  # noqa: F401
 from app.database import Base, create_database_engine
 from app.evaluation import models as evaluation_models  # noqa: F401
+from app.evaluation import (
+    provider_models,  # noqa: F401
+    speaking_asr_models,  # noqa: F401
+)
 from app.media import fixed_audio, recording, tts_attempt  # noqa: F401
 from app.papers import paper  # noqa: F401
 from app.scoring import models as scoring_models  # noqa: F401
 from app.sessions import assessment_session, close_manifest, credentials, submission  # noqa: F401
+from app.task_types import speaking, speaking_asr, speaking_guidance  # noqa: F401
 from app.taskbank import import_batch, models  # noqa: F401
 
 config = context.config

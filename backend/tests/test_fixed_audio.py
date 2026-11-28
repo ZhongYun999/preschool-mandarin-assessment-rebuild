@@ -269,6 +269,7 @@ def test_database_failure_after_file_write_does_not_commit_reference(db, bank, t
     assert len(synth.calls) == 1
 
 
+@pytest.mark.db_isolated
 def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
     paper_id, _, a, _, _ = published(db, bank)
     store = AudioStore(tmp_path)
@@ -290,7 +291,7 @@ def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0027_auth_users_sessions"
         assert (
             c.scalar(
                 text("SELECT storage_ref FROM fixed_audio_requests WHERE audio_id=:id"),
@@ -300,6 +301,7 @@ def test_immutable_contract_and_downgrade_protection(db, bank, tmp_path):
         )
 
 
+@pytest.mark.db_isolated
 def test_downgrade_refuses_copied_draft_audio_without_published_paper(db, bank):
     (
         paper_id,
@@ -333,5 +335,5 @@ def test_downgrade_refuses_copied_draft_audio_without_published_paper(db, bank):
         with pytest.raises(DBAPIError, match="must be preserved"):
             command.downgrade(config, "0005_publication_contract")
         c.rollback()
-        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0018_recordings"
+        assert c.scalar(text("SELECT version_num FROM alembic_version")) == "0027_auth_users_sessions"
         assert c.scalar(text("SELECT count(*) FROM fixed_audio_requests")) == 2

@@ -18,11 +18,11 @@ from app.evaluation.asr_contract import MODEL as ASR_MODEL
 from app.evaluation.asr_contract import SOURCE as ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as ASR_VERSION
 from app.evaluation.dashscope_asr import DashScopeASR
+from app.evaluation.identity import InputIdentityConflict
 from app.evaluation.models import EvaluationJob, RawEvaluation
 from app.evaluation.qa_text_contract import SOURCE, VERSION, valid_parameters
 from app.evaluation.qwen_qa_text import QwenQAText
 from app.evaluation.worker import (
-    InputIdentityConflict,
     authorize_retry,
     claim_job,
     execute_claim,
@@ -272,7 +272,9 @@ def test_old_llm_result_cannot_change_new_final_result(db, client, pipeline):
             task_url = f"{f['root']}/tasks/{f['tasks'][0]['session_task_id']}"
             assert (
                 client.post(
-                    task_url + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                    task_url + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "redo", "expected_attempt_id": f["attempt_id"]},
                 ).status_code
                 == 200
             )

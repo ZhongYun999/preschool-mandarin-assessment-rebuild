@@ -9,6 +9,25 @@ from app.evaluation.asr_contract import SOURCE as QWEN_ASR_SOURCE
 from app.evaluation.asr_contract import VERSION as QWEN_ASR_VERSION
 from app.evaluation.asr_contract import recognition_result as qwen_asr_recognition_result
 from app.evaluation.asr_contract import valid_parameters as valid_qwen_asr_parameters
+from app.evaluation.speaking_acoustic_contract import SOURCE as ACOUSTIC_SOURCE
+from app.evaluation.speaking_acoustic_contract import VERSION as ACOUSTIC_VERSION
+from app.evaluation.speaking_acoustic_contract import valid_consumption as acoustic_consumption
+from app.evaluation.speaking_acoustic_contract import valid_parameters as acoustic_parameters
+from app.evaluation.speaking_qwen_contract import SOURCE as SPEAKING_QWEN_SOURCE
+from app.evaluation.speaking_qwen_contract import VERSION as SPEAKING_QWEN_VERSION
+from app.evaluation.speaking_qwen_contract import valid_full_consumption, valid_parameters
+from app.evaluation.speaking_qwen_contract import validate_result as speaking_qwen_result
+from app.evaluation.speaking_text_execution_contract import DEEPSEEK_SOURCE, QWEN_SOURCE
+from app.evaluation.speaking_text_execution_contract import VERSION as SPEAKING_TEXT_VERSION
+from app.evaluation.speaking_text_execution_contract import (
+    review_recommendation as speaking_text_review,
+)
+from app.evaluation.speaking_text_execution_contract import (
+    supports_source as speaking_text_supports_source,
+)
+from app.evaluation.speaking_text_execution_contract import (
+    valid_consumption as speaking_text_consumption,
+)
 
 
 class ScoringUnavailable(ValueError):
@@ -37,6 +56,20 @@ class EvaluationContract:
     review_recommendation: Callable[[Mapping[str, Any]], bool] | bool | None = None
     recognition_result: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
     accepts_no_text: bool | None = None
+    speaking_consumption_validator: (
+        Callable[
+            [
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any],
+                Mapping[str, Any] | None,
+                Mapping[str, Any] | None,
+            ],
+            bool,
+        ]
+        | None
+    ) = None
+    speaking_recognition_result: Callable[..., Mapping[str, Any]] | None = None
 
 
 class Registry:
@@ -48,7 +81,15 @@ class Registry:
         self._requirements = {}
         if any(
             (c.recognition_result is not None and not callable(c.recognition_result))
+            or (
+                c.speaking_recognition_result is not None
+                and not callable(c.speaking_recognition_result)
+            )
             or (c.accepts_no_text is not None and type(c.accepts_no_text) is not bool)
+            or (
+                c.speaking_consumption_validator is not None
+                and not callable(c.speaking_consumption_validator)
+            )
             for c in contracts
         ):
             raise ValueError("Invalid recognition dependency contract")
@@ -98,6 +139,7 @@ class Registry:
         if (
             contract is None
             or task_type not in contract.task_types
+            or (task_type == "speaking" and not callable(contract.speaking_consumption_validator))
             or not contract.validate_parameters(params)
         ):
             return False
@@ -132,8 +174,16 @@ class Registry:
             or not self.supports(task_type, upstream)
         ):
             return False
+        if (req.get("source"), req.get("version")) == ("qa-text-evaluation", "1") and (
+            ref["source"],
+            ref["version"],
+        ) != (QWEN_ASR_SOURCE, QWEN_ASR_VERSION):
+            return False
         contract = self._contracts.get((ref["source"], ref["version"]))
-        return contract is not None and callable(contract.recognition_result)
+        return contract is not None and (
+            callable(contract.recognition_result)
+            or (task_type == "speaking" and callable(contract.speaking_recognition_result))
+        )
 
     def valid_plan(self, task_type: str, requirements: Any) -> bool:
         return isinstance(requirements, list) and all(
@@ -145,12 +195,44 @@ class Registry:
 
     def recognition_contract(self, requirement: Mapping[str, Any]) -> bool:
         contract = self._contracts.get((requirement["source"], requirement["version"]))
-        return bool(contract and contract.recognition_result is not None)
+        return bool(
+            contract and (contract.recognition_result or contract.speaking_recognition_result)
+        )
+
+    def validate_speaking_consumption(
+        self, requirement, source, consumption, upstream=None, payload=None
+    ):
+        contract = self._contracts.get((requirement["source"], requirement["version"]))
+        return bool(
+            contract
+            and contract.speaking_consumption_validator
+            and isinstance(consumption, dict)
+            and consumption
+            and contract.speaking_consumption_validator(
+                source, consumption, requirement, upstream, payload
+            )
+            is True
+        )
 
     def recognition_result(
-        self, requirement: Mapping[str, Any], payload: Mapping[str, Any]
+        self,
+        requirement: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        *,
+        speaking_source=None,
+        speaking_consumption=None,
+        provider=None,
+        model=None,
     ) -> dict:
         contract = self._contracts[(requirement["source"], requirement["version"])]
+        if speaking_source is not None and contract.speaking_recognition_result is not None:
+            if speaking_consumption is None:
+                raise ValueError("Speaking recognition requires frozen source and consumption")
+            return contract.speaking_recognition_result(
+                payload, requirement, speaking_source, speaking_consumption, provider, model
+            )
+        if contract.recognition_result is None:
+            raise ValueError("Recognition result is incompatible with input")
         result = contract.recognition_result(payload)
         if (
             not isinstance(result, dict)
@@ -197,4 +279,56 @@ QWEN_ASR_CONTRACT = EvaluationContract(
     False,
     recognition_result=qwen_asr_recognition_result,
 )
-PRODUCTION_REGISTRY = Registry(contracts=[QWEN_ASR_CONTRACT])
+SPEAKING_QWEN_ASR_CONTRACT = EvaluationContract(
+    SPEAKING_QWEN_SOURCE,
+    SPEAKING_QWEN_VERSION,
+    frozenset({"speaking"}),
+    valid_parameters,
+    False,
+    speaking_consumption_validator=valid_full_consumption,
+    speaking_recognition_result=speaking_qwen_result,
+)
+SPEAKING_TEXT_CONTRACTS = [
+    EvaluationContract(
+        source,
+        SPEAKING_TEXT_VERSION,
+        frozenset({"speaking"}),
+        lambda params, source=source: speaking_text_supports_source(params, source),
+        speaking_text_review,
+        accepts_no_text=True,
+        speaking_consumption_validator=speaking_text_consumption,
+    )
+    for source in (QWEN_SOURCE, DEEPSEEK_SOURCE)
+]
+
+
+def _qa_formal_parameters(params):
+    from app.evaluation.qa_formal_text_contract import valid_parameters
+
+    return valid_parameters(params)
+
+
+QA_FORMAL_TEXT_CONTRACT = EvaluationContract(
+    "qa-text-evaluation",
+    "1",
+    frozenset({"qa"}),
+    _qa_formal_parameters,
+    lambda payload: payload["evaluation"]["review_recommended"],
+    accepts_no_text=False,
+)
+
+PRODUCTION_REGISTRY = Registry(
+    contracts=[
+        QWEN_ASR_CONTRACT,
+        QA_FORMAL_TEXT_CONTRACT,
+        SPEAKING_QWEN_ASR_CONTRACT,
+        *SPEAKING_TEXT_CONTRACTS,
+        EvaluationContract(
+            ACOUSTIC_SOURCE,
+            ACOUSTIC_VERSION,
+            frozenset({"speaking"}),
+            acoustic_parameters,
+            speaking_consumption_validator=acoustic_consumption,
+        ),
+    ]
+)

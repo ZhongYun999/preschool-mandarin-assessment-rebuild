@@ -116,6 +116,7 @@ def test_old_unstarted_job_is_skipped_and_never_rescanned(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     adapter = FakeAdapter()
@@ -140,6 +141,7 @@ def test_redo_after_claim_before_dispatch_is_skipped(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     assert not execute_claim(db, work)
@@ -160,6 +162,7 @@ def test_redo_lock_serializes_before_claim(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             )
             held.set()
@@ -205,6 +208,7 @@ def test_closed_session_uses_manifest_candidate(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     newer = dict(context, attempt_id=aid)
@@ -256,6 +260,7 @@ def test_undispatched_expired_claim_is_recovered_without_unknown(db, context):
     assert adapter.calls == 1
 
 
+@pytest.mark.db_isolated
 def test_downgrade_wont_discard_skipped_facts(db, context):
     _, job_id = prepare(db, context)
     with Session(db) as s, s.begin():
@@ -263,6 +268,7 @@ def test_downgrade_wont_discard_skipped_facts(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         )
     tick(db)
@@ -278,6 +284,7 @@ def test_downgrade_wont_discard_skipped_facts(db, context):
         )
 
 
+@pytest.mark.db_isolated
 def test_waiting_dependency_can_become_ready_from_persistent_fact(db, context):
     from app.evaluation.worker import InputSnapshot
 
@@ -428,6 +435,7 @@ def test_claim_first_redo_waits_then_pre_dispatch_rechecks(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
 
@@ -460,6 +468,7 @@ def test_claim_first_redo_waits_then_pre_dispatch_rechecks(db, context):
     assert adapter.calls == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_legacy_running_job_is_conservatively_unknown(db, context):
     from uuid import uuid4
 
@@ -542,6 +551,7 @@ def test_unmaterialized_intent_cannot_be_marked_scheduled(db, context):
         assert s.scalar(select(func.count()).select_from(EvaluationJob)) == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_preserves_existing_ready_evidence_and_backfills_queue(db, context):
     from uuid import uuid4
 

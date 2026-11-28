@@ -2,7 +2,6 @@
 
 import os
 from datetime import datetime
-from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated, Literal
@@ -16,8 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.db import get_db  # _engine remains available for application lifecycle
 from app.api.teacher_auth import require_teacher
-from app.database import create_database_engine
 from app.media.fixed_audio import AudioStore, FixedAudio, readiness
 from app.media.tts_attempt import TTSAttempt
 from app.media.tts_worker import authorize_retry
@@ -37,16 +36,6 @@ from app.taskbank.models import Asset, TaskBank, TaskIdentity, TaskRevision
 from app.taskbank.preview_store import PreviewCorrupt, PreviewNotFound, PreviewStore
 
 router = APIRouter(prefix="/teacher", dependencies=[Depends(require_teacher)])
-
-
-@lru_cache(maxsize=1)
-def _engine():
-    return create_database_engine()
-
-
-def get_db():
-    with Session(_engine()) as session:
-        yield session
 
 
 def get_image_store() -> ImageStore:

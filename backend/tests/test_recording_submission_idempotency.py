@@ -69,7 +69,11 @@ def test_recorded_submission_retry_after_close_and_completion(db, client, reques
         old.status_code == 200
         and submit(old_attempt, old_recording, req="old").json() == old.json()
     )
-    redo = client.post(url + "/redo", headers=h, json={"redo_request_id": "redo"}).json()
+    redo = client.post(
+        url + "/redo",
+        headers=h,
+        json={"redo_request_id": "redo", "expected_attempt_id": old_attempt},
+    ).json()
     new_attempt = redo["attempt_id"]
     assert submit(old_attempt, old_recording, req="old").json() == old.json()
     with Session(db) as s:

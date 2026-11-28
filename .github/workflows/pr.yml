@@ -62,7 +62,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: python -m pip install -e 'backend[dev]'
       - run: ruff check backend
-      - run: python -m pytest backend/tests
+      - run: python -m pytest backend/tests --durations=25
       - run: alembic -c backend/alembic.ini upgrade head
   result:
     name: PR result

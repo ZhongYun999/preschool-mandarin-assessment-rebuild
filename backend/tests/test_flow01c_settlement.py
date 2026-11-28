@@ -1,8 +1,5 @@
 """HTTP-to-worker settlement acceptance with isolated PostgreSQL facts."""
 
-import hashlib
-import json
-import secrets
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
@@ -111,12 +108,7 @@ def flow(db, bank, tmp_path, client, monkeypatch):
         prepare_audio(db, paper, store, Synth())
         app.dependency_overrides[get_audio_store] = lambda: store
         app.dependency_overrides[get_scoring_registry] = lambda: registry
-        token = secrets.token_urlsafe(32)
-        monkeypatch.setenv(
-            "TEACHER_REVIEW_TOKEN_HASHES",
-            json.dumps({"teacher": hashlib.sha256(token.encode()).hexdigest()}),
-        )
-        teacher = {"Authorization": "Bearer " + token}
+        teacher = AUTH
         response = client.post(
             "/teacher/assessment/sessions",
             headers=AUTH,
@@ -164,7 +156,14 @@ def flow(db, bank, tmp_path, client, monkeypatch):
             old_submission = submissions[0]
             base = f"{root}/tasks/{state['tasks'][0]['session_task_id']}"
             attempt = client.post(
-                base + "/redo", headers=headers, json={"redo_request_id": "redo"}
+                base + "/redo",
+                headers=headers,
+                json={
+                    "redo_request_id": "redo",
+                    "expected_attempt_id": client.get(root, headers=headers).json()["tasks"][0][
+                        "attempt_id"
+                    ],
+                },
             ).json()["attempt_id"]
             for kind in ("GUIDE", "INITIAL_PROMPT"):
                 row = client.post(
@@ -269,7 +268,7 @@ def test_http_review_nonlinear_and_idempotency(db, client, flow):
     assert len(run_settlement_once(db, registry=f["registry"])["pending"]) == 1
     assert count(db, PendingReview) == 2
     assert (
-        client.post("/teacher/banks", headers=f["teacher"], json={"name": "x"}).status_code == 401
+        client.post("/teacher/banks", headers=f["teacher"], json={"name": "x"}).status_code == 201
     )
     first_path = (
         f"/teacher/sessions/{f['sid']}/reviews/{f['tasks'][0]['session_task_id']}/decisions"
@@ -281,7 +280,7 @@ def test_http_review_nonlinear_and_idempotency(db, client, flow):
         "action": "CONFIRM",
         "override_value": None,
     }
-    assert client.post(first_path, headers=AUTH, json=first_body).status_code == 403
+    assert client.post(first_path, json=first_body).status_code == 401
     assert client.post(first_path, headers=f["teacher"], json=first_body).status_code == 200
     second_path = (
         f"/teacher/sessions/{f['sid']}/reviews/{f['tasks'][1]['session_task_id']}/decisions"
@@ -510,7 +509,9 @@ def test_http_close_competing_with_submit_or_redo(
             return client.post(root + "/close", headers=headers, json={"close_request_id": "close"})
         if name == "redo":
             return client.post(
-                task_root + "/redo", headers=headers, json={"redo_request_id": "redo"}
+                task_root + "/redo",
+                headers=headers,
+                json={"redo_request_id": "redo", "expected_attempt_id": submit_body["attempt_id"]},
             )
         return client.post(
             task_root + "/submissions/instruction", headers=headers, json=submit_body

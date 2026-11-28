@@ -247,7 +247,12 @@ def start_attempt(session: Session, *, session_id: UUID, session_task_id: UUID) 
 
 
 def redo_attempt(
-    session: Session, *, session_id: UUID, session_task_id: UUID, redo_request_id: str
+    session: Session,
+    *,
+    session_id: UUID,
+    session_task_id: UUID,
+    redo_request_id: str,
+    expected_attempt_id: UUID | None,
 ) -> Attempt:
     _identity(redo_request_id)
     task = _lock_task(session, session_id, session_task_id)
@@ -259,6 +264,8 @@ def redo_attempt(
     )
     if existing is not None:
         return existing
+    if task.current_attempt_id != expected_attempt_id:
+        raise ValueError("Expected attempt is no longer current")
     if task.current_attempt_id is not None:
         current = session.scalar(
             select(Attempt)

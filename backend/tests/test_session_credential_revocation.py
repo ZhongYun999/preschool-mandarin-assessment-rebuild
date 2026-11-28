@@ -82,7 +82,7 @@ def test_listing_revocation_recovery_and_access_boundaries(db, client, setup_api
     bad = {"attempt_id": str(uuid4()), "submit_request_id": "x", "selected_choice_id": "A"}
     operations = [
         ("/attempt", None),
-        ("/redo", {"redo_request_id": "r"}),
+        ("/redo", {"redo_request_id": "r", "expected_attempt_id": None}),
         ("/submissions/instruction", bad),
         ("/playbacks", {"attempt_id": str(uuid4()), "request_id": "x", "kind": "GUIDE"}),
         ("/playbacks/" + str(uuid4()) + "/finish", {"attempt_id": str(uuid4()), "completed": True}),
@@ -124,6 +124,7 @@ def test_listing_revocation_recovery_and_access_boundaries(db, client, setup_api
         )
 
 
+@pytest.mark.db_isolated
 def test_migration_existing_credentials_and_guard(db, client, setup_api):
     sid = client.post(
         "/teacher/assessment/sessions", headers=AUTH, json=create_body(setup_api["paper_id"])
@@ -138,6 +139,9 @@ def test_migration_existing_credentials_and_guard(db, client, setup_api):
         connection.commit()
         command.upgrade(config, "head")
         connection.commit()
+    from auth_helpers import prepare_admin
+
+    prepare_admin(db)
     assert (
         client.get(f"/assessment/sessions/{sid}", headers=access(credential["token"])).status_code
         == 200
@@ -217,7 +221,11 @@ def test_revoke_and_writes_serialized(
                 },
             )
         if operation == "redo":
-            return client.post(base + "/redo", headers=headers, json={"redo_request_id": "redo"})
+            return client.post(
+                base + "/redo",
+                headers=headers,
+                json={"redo_request_id": "redo", "expected_attempt_id": str(one["attempt_id"])},
+            )
         return client.post(
             f"/assessment/sessions/{sid}/close", headers=headers, json={"close_request_id": "close"}
         )

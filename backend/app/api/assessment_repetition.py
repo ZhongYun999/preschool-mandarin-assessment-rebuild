@@ -6,7 +6,7 @@ import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -18,13 +18,20 @@ from app.api.assessment_auth import (
     require_session_access,
 )
 from app.api.assessment_operations import conflict, task_row
-from app.api.teacher_api import get_db
+from app.api.teacher_api import get_audio_store, get_db
+from app.media.audio_inspection import AudioError, AudioTools, inspect_audio
+from app.media.fixed_audio import AudioStore
 from app.media.recording import Recording
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, Attempt
+from app.sessions.submission import Playback
+from app.task_types import speaking
 from app.task_types.qa import submit_qa
 from app.task_types.repetition import submit_repetition
 from app.task_types.simple_recording import cancel_recording, save_recording, start_recording
+from app.task_types.speaking import SpeakingSegment
+from app.task_types.speaking_asr import SpeakingASR
+from app.task_types.speaking_guidance import GuidanceAudio, SpeakingHelpRequest, request_help
 
 router = APIRouter(prefix="/assessment/sessions/{session_id}/tasks/{task_id}")
 read_auth = Depends(require_read_session_access)
@@ -39,6 +46,7 @@ def get_recording_store():
 
 
 recording_store = Depends(get_recording_store)
+audio_store = Depends(get_audio_store)
 
 
 class RecordingStart(BaseModel):
@@ -57,6 +65,285 @@ class RecordingSubmit(BaseModel):
     attempt_id: UUID
     recording_id: UUID
     submit_request_id: str = Field(min_length=1, pattern=r"\S")
+
+
+class SpeakingFinish(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    finish_request_id: str = Field(min_length=1, pattern=r"\S")
+
+
+class ASRRetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    request_id: str = Field(min_length=1, pattern=r"\S")
+    expected_attempts: int = Field(ge=0)
+    accept_unknown: StrictBool = False
+
+
+class HelpInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    request_id: str = Field(min_length=1, pattern=r"\S")
+
+
+class HelpRetry(HelpInput):
+    expected_attempts: int = Field(ge=0)
+    accept_unknown: StrictBool = False
+
+
+class HelpVoid(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: UUID
+    accept_unknown: StrictBool = False
+
+
+@router.post("/help-requests")
+def create_help(
+    session_id: UUID,
+    task_id: UUID,
+    body: HelpInput,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            row = request_help(
+                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
+            )
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/retry")
+def retry_help(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("Help request not found")
+            if row.retry_request_id == body.request_id:
+                if row.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"help_request_id": row.help_request_id, "status": row.status}
+            if row.attempts != body.expected_attempts or row.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Help request cannot be retried")
+            if row.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            row.status, row.error_code = "WAITING", None
+            row.retry_request_id, row.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/void")
+def void_help(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpVoid,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+    store: AudioStore = audio_store,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise ValueError("Help request not found")
+            if row.status == "VOIDED":
+                return {"help_request_id": row.help_request_id, "status": row.status}
+            if row.status == "READY":
+                audio = db.scalar(
+                    select(GuidanceAudio)
+                    .where(GuidanceAudio.help_request_id == help_id)
+                    .with_for_update()
+                )
+                playback = (
+                    db.scalar(
+                        select(Playback)
+                        .where(Playback.guidance_audio_id == audio.audio_id)
+                        .order_by(Playback.playback_id)
+                        .limit(1)
+                    )
+                    if audio
+                    else None
+                )
+                if audio is None or audio.attempt_id != body.attempt_id:
+                    raise ValueError("Guidance audio not available")
+                if (
+                    db.scalar(
+                        select(Playback.playback_id).where(
+                            Playback.attempt_id == body.attempt_id, Playback.status == "STARTED"
+                        )
+                    )
+                    is not None
+                ):
+                    raise ValueError("Playback in progress")
+                if audio.status == "UNKNOWN" and not body.accept_unknown:
+                    raise ValueError("Unknown external outcome requires explicit acknowledgment")
+                resource_unavailable = False
+                if audio.status in ("READY", "SAVED"):
+                    try:
+                        store.read(audio.storage_ref, audio.content_sha256)
+                    except (ValueError, OSError):
+                        resource_unavailable = True
+                if (
+                    audio.status not in ("FAILED", "UNKNOWN")
+                    and not resource_unavailable
+                    and not (
+                        audio.status == "READY"
+                        and playback is not None
+                        and playback.status == "FAILED"
+                    )
+                ):
+                    raise ValueError("Guidance delivery cannot be voided")
+                row.error_code = (
+                    "GUIDANCE_AUDIO_UNAVAILABLE" if resource_unavailable else "DELIVERY_FAILED"
+                )
+                row.execution_history = [
+                    *row.execution_history,
+                    {"status": row.error_code, "audio_id": str(audio.audio_id)},
+                ]
+            elif row.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Help request cannot be voided")
+            if row.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            row.status = "VOIDED"
+            return {"help_request_id": row.help_request_id, "status": row.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/help-requests/{help_id}/audio/retry")
+def retry_guidance_audio(
+    session_id: UUID,
+    task_id: UUID,
+    help_id: UUID,
+    body: HelpRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            help_row = db.scalar(
+                select(SpeakingHelpRequest)
+                .where(
+                    SpeakingHelpRequest.help_request_id == help_id,
+                    SpeakingHelpRequest.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            audio = db.scalar(
+                select(GuidanceAudio)
+                .where(GuidanceAudio.help_request_id == help_id)
+                .with_for_update()
+            )
+            if help_row is None or help_row.status != "READY" or audio is None:
+                raise ValueError("Guidance audio not available")
+            if audio.retry_request_id == body.request_id:
+                if audio.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"audio_id": audio.audio_id, "status": audio.status}
+            if (
+                audio.status not in ("FAILED", "UNKNOWN")
+                or audio.attempts != body.expected_attempts
+            ):
+                raise ValueError("Guidance audio cannot be retried")
+            if audio.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            audio.status, audio.error_code = "WAITING", None
+            audio.retry_request_id, audio.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"audio_id": audio.audio_id, "status": audio.status}
+        except ValueError as exc:
+            conflict(exc)
+
+
+@router.post("/segments/{segment_id}/asr/retry")
+def retry_asr(
+    session_id: UUID,
+    task_id: UUID,
+    segment_id: UUID,
+    body: ASRRetry,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+):
+    with db.begin():
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        confirm_write_access(db, session_id, _auth)
+        task_row(db, session_id, task_id)
+        try:
+            speaking.current(db, session_id, task_id, body.attempt_id)
+            job = db.scalar(
+                select(SpeakingASR)
+                .join(SpeakingSegment)
+                .where(
+                    SpeakingSegment.segment_id == segment_id,
+                    SpeakingSegment.attempt_id == body.attempt_id,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                raise ValueError("Recognition operation not found")
+            if job.retry_request_id == body.request_id:
+                if job.retry_expected_attempts != body.expected_attempts:
+                    raise ValueError("Retry request conflicts")
+                return {"operation_id": job.operation_id, "status": job.status}
+            if job.attempts != body.expected_attempts or job.status not in ("FAILED", "UNKNOWN"):
+                raise ValueError("Recognition is not available for retry")
+            if job.status == "UNKNOWN" and not body.accept_unknown:
+                raise ValueError("Unknown external outcome requires explicit acknowledgment")
+            job.status, job.error_code = "WAITING", None
+            job.retry_request_id, job.retry_expected_attempts = (
+                body.request_id,
+                body.expected_attempts,
+            )
+            return {"operation_id": job.operation_id, "status": job.status}
+        except ValueError as exc:
+            conflict(exc)
 
 
 def view(row, session_id, task_id):
@@ -83,11 +370,10 @@ def begin_recording(
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, _auth)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = start_recording(
-                db, session_id=session_id, session_task_id=task_id, **body.model_dump()
-            )
+            action = speaking.start if revision.task_type == "speaking" else start_recording
+            row = action(db, session_id=session_id, session_task_id=task_id, **body.model_dump())
             return view(row, session_id, task_id)
         except ValueError as exc:
             conflict(exc)
@@ -105,9 +391,10 @@ def cancel(
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, _auth)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = cancel_recording(
+            action = speaking.cancel if revision.task_type == "speaking" else cancel_recording
+            row = action(
                 db,
                 session_id=session_id,
                 session_task_id=task_id,
@@ -127,7 +414,7 @@ def _preflight_upload(db, session_id, task_id, attempt_id, recording_id):
         owner = db.get(AssessmentSession, session_id)
         if (
             owner.status != "IN_PROGRESS"
-            or revision.task_type not in ("repetition", "qa")
+            or revision.task_type not in ("repetition", "qa", "speaking")
             or task.current_attempt_id != attempt_id
             or attempt is None
             or attempt.status != "OPEN"
@@ -136,17 +423,34 @@ def _preflight_upload(db, session_id, task_id, attempt_id, recording_id):
             or row.status not in ("STARTED", "SAVED")
         ):
             raise HTTPException(409, "Recording is not available for upload")
+        return revision.task_type, row.sha256
 
 
 def _persist_upload(
-    db, session_id, task_id, attempt_id, recording_id, credential_id, ref, sha, media_type, store
+    db,
+    session_id,
+    task_id,
+    attempt_id,
+    recording_id,
+    credential_id,
+    ref,
+    sha,
+    media_type,
+    store,
+    audio_info,
 ):
     with db.begin():
         db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
         confirm_write_access(db, session_id, credential_id)
-        task_row(db, session_id, task_id)
+        _, _, revision = task_row(db, session_id, task_id)
         try:
-            row = save_recording(
+            action = speaking.save if revision.task_type == "speaking" else save_recording
+            extra = (
+                {"duration_seconds": audio_info.duration_seconds}
+                if revision.task_type == "speaking"
+                else {}
+            )
+            row = action(
                 db,
                 session_id=session_id,
                 session_task_id=task_id,
@@ -156,6 +460,7 @@ def _persist_upload(
                 sha256=sha,
                 media_type=media_type,
                 store=store,
+                **extra,
             )
             return view(row, session_id, task_id)
         except ValueError as exc:
@@ -177,22 +482,58 @@ async def upload(
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if not re.fullmatch(r"audio/[a-z0-9][a-z0-9!#$&^_.+\-]*", media_type):
         raise HTTPException(422, "An audio media type is required")
-    await run_in_threadpool(_preflight_upload, db, session_id, task_id, attempt_id, recording_id)
+    task_type, existing_digest = await run_in_threadpool(
+        _preflight_upload, db, session_id, task_id, attempt_id, recording_id
+    )
     digest = hashlib.sha256()
     file, path = await run_in_threadpool(store.staging_file)
     size = 0
+    audio_tools = AudioTools() if task_type == "speaking" else None
     try:
         with file:
             async for chunk in request.stream():
                 if chunk:
+                    size += len(chunk)
+                    if audio_tools is not None and size > audio_tools.max_input_bytes:
+                        raise HTTPException(413, detail={"code": "AUDIO_RESOURCE_LIMIT"})
                     await run_in_threadpool(file.write, chunk)
                     digest.update(chunk)
-                    size += len(chunk)
             if not size:
+                if audio_tools is not None:
+                    raise HTTPException(422, detail={"code": "AUDIO_UNRECOGNIZED"})
                 raise HTTPException(422, "Recording is empty")
             await run_in_threadpool(file.flush)
             await run_in_threadpool(os.fsync, file.fileno())
         sha = digest.hexdigest()
+        if task_type == "speaking" and existing_digest is not None and sha != existing_digest:
+            raise HTTPException(409, "Recording upload conflicts")
+        audio_info = None
+        if task_type == "speaking":
+            try:
+                audio_info = await run_in_threadpool(inspect_audio, path, audio_tools)
+            except AudioError as exc:
+                if exc.code in {
+                    "AUDIO_UNRECOGNIZED",
+                    "AUDIO_NO_STREAM",
+                    "AUDIO_METADATA_INCOMPLETE",
+                    "AUDIO_DECODE_FAILED",
+                    "AUDIO_STREAM_CORRUPT",
+                }:
+                    status, code = 422, exc.code
+                elif exc.code == "AUDIO_RESOURCE_LIMIT":
+                    status, code = 413, exc.code
+                elif exc.code == "AUDIO_TOOL_TIMEOUT":
+                    status, code = 504, exc.code
+                elif exc.code == "AUDIO_TOOL_UNAVAILABLE":
+                    status, code = 503, exc.code
+                else:
+                    status = 500
+                    code = (
+                        "AUDIO_TOOL_FAILED"
+                        if exc.code == "AUDIO_TOOL_FAILED"
+                        else "AUDIO_INSPECTION_FAILED"
+                    )
+                raise HTTPException(status, detail={"code": code}) from exc
         try:
             ref = await run_in_threadpool(store.commit, path, sha)
         except ValueError as exc:
@@ -209,6 +550,7 @@ async def upload(
             sha,
             media_type,
             store,
+            audio_info,
         )
     finally:
         path.unlink(missing_ok=True)
@@ -223,7 +565,7 @@ def list_recordings(
     db: Session = read_db,
 ):
     task, _, revision = task_row(db, session_id, task_id)
-    if revision.task_type not in ("repetition", "qa"):
+    if revision.task_type not in ("repetition", "qa", "speaking"):
         raise HTTPException(404, "Recordings not available")
     rows = (
         []
@@ -257,7 +599,7 @@ def recording_content(
             Recording.status == "SAVED",
         )
     )
-    if revision.task_type not in ("repetition", "qa") or row is None:
+    if revision.task_type not in ("repetition", "qa", "speaking") or row is None:
         raise HTTPException(404, "Recording not found")
     try:
         data = store.read(row.storage_ref, row.sha256)
@@ -306,3 +648,15 @@ def submit_qa_answer(
     store: RecordingStore = recording_store,
 ):
     return _submit_recording(db, session_id, task_id, body, _auth, store, submit_qa)
+
+
+@router.post("/submissions/speaking")
+def submit_speaking_answer(
+    session_id: UUID,
+    task_id: UUID,
+    body: SpeakingFinish,
+    _auth: UUID = write_auth,
+    db: Session = write_db,
+    store: RecordingStore = recording_store,
+):
+    return _submit_recording(db, session_id, task_id, body, _auth, store, speaking.submit_speaking)

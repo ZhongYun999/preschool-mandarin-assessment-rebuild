@@ -16,6 +16,59 @@ from app.sessions.submission import Playback, Submission
 pytest_plugins = ("test_assessment_http",)
 
 
+def test_redo_request_identity_stale_and_recovery(db, client, setup_api):
+    sid = client.post(
+        "/teacher/assessment/sessions", headers=AUTH, json=create_body(setup_api["paper_id"])
+    ).json()["session_id"]
+    headers = access(issue(client, sid))
+    root = f"/assessment/sessions/{sid}"
+    tasks = client.get(root, headers=headers).json()["tasks"]
+    base = f"{root}/tasks/{tasks[0]['session_task_id']}"
+    url = base + "/redo"
+    assert client.post(url, headers=headers, json={"redo_request_id": "missing"}).status_code == 422
+    assert (
+        client.post(
+            url, headers=headers, json={"redo_request_id": "bad", "expected_attempt_id": "invalid"}
+        ).status_code
+        == 422
+    )
+    initial = {"redo_request_id": "initial", "expected_attempt_id": None}
+    a = client.post(url, headers=headers, json=initial).json()["attempt_id"]
+    assert (
+        client.post(
+            url,
+            headers=headers,
+            json={"redo_request_id": "stale-null", "expected_attempt_id": None},
+        ).status_code
+        == 409
+    )
+    r1 = {"redo_request_id": "r1", "expected_attempt_id": a}
+    b = client.post(url, headers=headers, json=r1).json()["attempt_id"]
+    assert client.post(url, headers=headers, json=r1).json()["attempt_id"] == b
+    stale = client.post(
+        url, headers=headers, json={"redo_request_id": "r2", "expected_attempt_id": a}
+    )
+    assert stale.status_code == 409 and "no longer current" in stale.text
+    state = client.get(root, headers=headers)
+    assert state.status_code == 200 and state.json()["tasks"][0]["attempt_id"] == b
+    c = client.post(
+        url, headers=headers, json={"redo_request_id": "r3", "expected_attempt_id": b}
+    ).json()["attempt_id"]
+    historic = client.post(url, headers=headers, json=r1).json()
+    assert historic == {"attempt_id": b, "status": "ABANDONED", "current_attempt_id": c}
+    assert (
+        client.post(
+            url, headers=headers, json={"redo_request_id": "r1", "expected_attempt_id": c}
+        ).json()
+        == historic
+    )
+    assert client.get(root, headers=headers).json()["tasks"][0]["attempt_id"] == c
+    assert client.post(f"{root}/tasks/{uuid4()}/redo", headers=headers, json=r1).status_code == 404
+    assert client.post(url, headers={}, json=r1).status_code == 401
+    with Session(db) as s:
+        assert s.get(SessionTask, UUID(tasks[0]["session_task_id"])).current_attempt_id == UUID(c)
+
+
 def test_http_flow_and_redo(db, client, setup_api):
     sid = client.post(
         "/teacher/assessment/sessions", headers=AUTH, json=create_body(setup_api["paper_id"])
@@ -51,11 +104,19 @@ def test_http_flow_and_redo(db, client, setup_api):
     guide = play(first, "GUIDE", "g").json()
     assert play(first, "GUIDE", "g").json()["playback_id"] == guide["playback_id"]
     assert play(first, "INITIAL_PROMPT", "p").status_code == 409
-    redo = client.post(base + "/redo", headers=headers, json={"redo_request_id": "redo"}).json()
+    redo = client.post(
+        base + "/redo",
+        headers=headers,
+        json={"redo_request_id": "redo", "expected_attempt_id": first},
+    ).json()
     second = redo["attempt_id"]
     assert second != first
     assert (
-        client.post(base + "/redo", headers=headers, json={"redo_request_id": "redo"}).json()
+        client.post(
+            base + "/redo",
+            headers=headers,
+            json={"redo_request_id": "redo", "expected_attempt_id": first},
+        ).json()
         == redo
     )
     finish_url = base + "/playbacks/" + guide["playback_id"] + "/finish"
@@ -132,6 +193,7 @@ def test_finish_and_redo_race(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
 
@@ -147,6 +209,7 @@ def test_finish_and_redo_race(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
             == new_id
@@ -165,6 +228,7 @@ def test_old_submission_never_restored_after_redo(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     try:
@@ -198,6 +262,14 @@ def test_http_close_and_session_isolation(db, client, setup_api):
         0
     ]["session_task_id"]
     assert client.get(f"{root}/tasks/{other_task}/content", headers=headers).status_code == 404
+    redo_body = {"redo_request_id": "cross-session", "expected_attempt_id": None}
+    assert (
+        client.post(first_base + "/redo", headers=other_headers, json=redo_body).status_code == 401
+    )
+    assert (
+        client.post(f"{root}/tasks/{other_task}/redo", headers=headers, json=redo_body).status_code
+        == 404
+    )
     first_audio = client.get(first_base + "/content", headers=headers).json()["audio"]["prompt"]
     assert client.get(first_audio, headers=other_headers).status_code == 401
     for task, choice in zip(tasks, ("A", "C"), strict=True):
@@ -237,7 +309,9 @@ def test_http_close_and_session_isolation(db, client, setup_api):
     assert client.post(first_base + "/attempt", headers=headers).status_code == 409
     assert (
         client.post(
-            first_base + "/redo", headers=headers, json={"redo_request_id": "later"}
+            first_base + "/redo",
+            headers=headers,
+            json={"redo_request_id": "later", "expected_attempt_id": None},
         ).status_code
         == 409
     )

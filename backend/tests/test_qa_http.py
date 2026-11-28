@@ -401,7 +401,9 @@ def test_qa_failure_redo_and_cross_attempt(db, client, qa_flow):
         assert s.scalar(select(Submission).where(Submission.attempt_id == UUID(aid))) is None
     old = submit(client, f, aid, rid).json()["submission_id"]
     new = client.post(
-        base(f) + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+        base(f) + "/redo",
+        headers=f["headers"],
+        json={"redo_request_id": "redo", "expected_attempt_id": aid},
     ).json()["attempt_id"]
     assert submit(client, f, new, rid, request="new").status_code == 409
     assert upload(client, f, aid, rid).status_code == 409
@@ -694,7 +696,9 @@ def test_qa_close_competing_with_submit_or_redo(db, client, qa_flow, monkeypatch
             return submit(client, f, *inputs[1], index=1)
         if action == "redo":
             return client.post(
-                base(f, 1) + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                base(f, 1) + "/redo",
+                headers=f["headers"],
+                json={"redo_request_id": "redo", "expected_attempt_id": inputs[1][0]},
             )
         return client.post(
             f["root"] + "/close", headers=f["headers"], json={"close_request_id": "close"}
@@ -749,7 +753,9 @@ def test_qa_redo_during_playback_rejects_late_receipt(db, client, qa_flow):
         headers=h,
         json={"attempt_id": aid, "request_id": "replay", "kind": "USER_REPLAY"},
     ).json()
-    redo = client.post(url + "/redo", headers=h, json={"redo_request_id": "redo"})
+    redo = client.post(
+        url + "/redo", headers=h, json={"redo_request_id": "redo", "expected_attempt_id": aid}
+    )
     assert redo.status_code == 200
     assert (
         client.post(
@@ -788,7 +794,9 @@ def test_qa_redo_rejects_late_upload(db, client, qa_flow, monkeypatch):
             assert entered.wait(10)
             assert (
                 client.post(
-                    base(f) + "/redo", headers=f["headers"], json={"redo_request_id": "redo"}
+                    base(f) + "/redo",
+                    headers=f["headers"],
+                    json={"redo_request_id": "redo", "expected_attempt_id": aid},
                 ).status_code
                 == 200
             )

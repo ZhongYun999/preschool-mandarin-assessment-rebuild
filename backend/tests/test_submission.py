@@ -153,6 +153,7 @@ def test_redo_history_and_rollback(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="redo",
         ).attempt_id
     with Session(db) as s:
@@ -191,6 +192,7 @@ def test_concurrent_submit_redo(db, context):
                 s,
                 session_id=context["session_id"],
                 session_task_id=context["session_task_id"],
+                expected_attempt_id=context["attempt_id"],
                 redo_request_id="redo",
             ).attempt_id
 
@@ -220,6 +222,7 @@ def test_closed_session_refuses_playback_submit_and_redo(db, context):
             s,
             session_id=context["session_id"],
             session_task_id=context["session_task_id"],
+            expected_attempt_id=context["attempt_id"],
             redo_request_id="x",
         ),
     ):
@@ -227,6 +230,7 @@ def test_closed_session_refuses_playback_submit_and_redo(db, context):
             operation(s)
 
 
+@pytest.mark.db_isolated
 def test_downgrade_preserves_facts(db, context):
     deliver(db, context)
     with Session(db) as s, s.begin():
@@ -269,7 +273,7 @@ def test_concurrent_duplicate_submissions_have_one_intent(db, context):
         assert s.scalar(select(func.count()).select_from(EvaluationIntent)) == 1
 
 
-def test_technical_retry_is_not_replay(db, context):
+def test_technical_retry_completes_original_replay_once(db, context):
     deliver(db, context)
     with Session(db) as s, s.begin():
         replay = start(s, context, "USER_REPLAY", "r").playback_id
@@ -277,7 +281,7 @@ def test_technical_retry_is_not_replay(db, context):
         retry = start(s, context, "TECHNICAL_RETRY", "retry", replay).playback_id
         finish(s, context, retry)
         result = submit(s, context)
-        assert result.inputs["replay_playback_ids"] == []
+        assert result.inputs["replay_playback_ids"] == [str(replay)]
 
 
 def test_no_guide_and_no_evaluation_requirements(db, bank, tmp_path):
@@ -309,6 +313,7 @@ def test_no_guide_and_no_evaluation_requirements(db, bank, tmp_path):
         assert s.scalar(select(func.count()).select_from(EvaluationIntent)) == 0
 
 
+@pytest.mark.db_isolated
 def test_upgrade_rejects_legacy_sealed_attempt_without_submission(db, context):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     with db.connect() as c:

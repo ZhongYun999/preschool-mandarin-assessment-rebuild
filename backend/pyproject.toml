@@ -17,16 +17,20 @@ dependencies = [
   "openpyxl>=3.1,<4",
   "Pillow>=10,<12",
   "dashscope>=2.1.0,<3",
+  "cryptography>=42,<51",
+  "httpx>=0.27,<1",
+  "pwdlib[argon2]>=0.2,<1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "httpx>=0.27,<1", "ruff>=0.11,<1", "cryptography>=42,<51"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["db_isolated: use a dedicated migrated schema for migration or schema-level tests"]
 
 [tool.ruff]
 target-version = "py312"

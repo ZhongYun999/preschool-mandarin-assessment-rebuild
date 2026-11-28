@@ -9,7 +9,6 @@ from app.media.recording import Recording, recording_busy
 from app.media.recording_store import RecordingStore
 from app.sessions.assessment_session import AssessmentSession, _identity
 from app.sessions.submission import (
-    Playback,
     Submission,
     _accept_submission,
     _busy,
@@ -17,6 +16,7 @@ from app.sessions.submission import (
     _locked,
     _open,
     _revision,
+    effective_replay_ids,
 )
 
 
@@ -154,17 +154,7 @@ def submit_recording(
     if recording.status != "SAVED":
         raise ValueError("Recording is not saved")
     store.verify(recording.storage_ref, recording.sha256)
-    replay_ids = list(
-        db.scalars(
-            select(Playback.playback_id)
-            .where(
-                Playback.attempt_id == attempt_id,
-                Playback.kind == "USER_REPLAY",
-                Playback.status == "COMPLETED",
-            )
-            .order_by(Playback.playback_id)
-        )
-    )
+    replay_ids = effective_replay_ids(db, attempt_id)
     return _accept_submission(
         db,
         task=task,

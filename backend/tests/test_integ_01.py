@@ -114,7 +114,6 @@ def make_registry():
 @pytest.fixture
 def context(db, tmp_path, monkeypatch):
     monkeypatch.setenv("TEACHER_MANAGEMENT_TOKEN", "test-token-only")
-    monkeypatch.setattr("app.api.teacher_auth.load_dotenv", lambda: None)
     images, previews, audio = tmp_path / "images", tmp_path / "previews", tmp_path / "audio"
     app = make_app(db, images, previews)
     store = AudioStore(audio)

@@ -43,12 +43,12 @@ uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 
 ```powershell
 ruff check backend
-python -m pytest backend/tests
+python -m pytest backend/tests --durations=25
 python scripts/check_docs.py
 python -m unittest discover -s scripts -p 'test_*.py'
 ```
 
-迁移测试在 `TEST_DATABASE_URL` 指定的数据库中建立随机临时 schema，测试完成后清理；未设置该变量会明确失败。新建迁移可用 `alembic -c backend/alembic.ini revision -m "说明"`，执行迁移使用上面的 `upgrade head`。迁移前应检查目标数据库。
+测试要求 `TEST_DATABASE_URL` 使用本机 PostgreSQL，数据库名以 `test_` 开头或以 `_test` 结尾；不接受 URL 查询参数或覆盖连接的 libpq 服务配置。普通测试共用随机 Schema，并在每项测试后清空业务数据；迁移及 Schema 变更测试使用 `@pytest.mark.db_isolated` 的独立 Schema。结束时释放连接并删除随机 Schema，不支持 pytest-xdist。新建迁移可用 `alembic -c backend/alembic.ini revision -m "说明"`，执行迁移使用上面的 `upgrade head`。迁移前应检查目标数据库。
 
 ## Excel 模板与预检
 
@@ -60,13 +60,13 @@ python -m unittest discover -s scripts -p 'test_*.py'
 
 ## 教师题库管理 API
 
-设置私有环境变量 `TEACHER_MANAGEMENT_TOKEN` 后，使用 `Authorization: Bearer <token>` 访问 `/teacher` 下的题库管理、题目历史、图片、模板和导入报告接口。未配置 Token 时管理接口不可用；不要把 Token 放入 URL、日志或仓库。此临时共享凭据授予全部教师管理接口访问权，后续可替换为正式身份体系；`/health` 仅返回服务存活状态。
+教师和管理员通过正式用户与服务端登录会话访问 `/teacher` 接口；初始管理员创建、可信 Origin、Cookie、CSRF 和旧凭据切换说明见 [AUTH-01](docs/design/AUTH_01_TEACHER_IDENTITY.md)。`/health` 仅返回服务存活状态。
 
 设置 `TASKBANK_ASSET_ROOT` 可以指定 DATA-02B 使用的图片根目录，必须与导入服务保持一致；不配置时使用被 Git 忽略的 `uploads/taskbank`。图片按题库、题目修订和槽位读取并校验内容摘要，接口不返回本地文件路径。题目列表的 `content_summary` 为题干前 120 个字符，查询支持题号子串、学段、题型、`offset` 和 `limit`。
 
 ### HTTP 两阶段 Excel 导入
 
-共享管理凭据适用于以下题库管理接口。向 `POST /teacher/banks/{bank_id}/import-previews` 以 multipart `file` 上传 XLSX；有效预览返回 `preview_id`、行级变化及问题，错误文件返回 422 和行列信息。可通过 `GET /teacher/banks/{bank_id}/import-previews/{preview_id}` 恢复预览；确认时向对应的 `/confirm` 发送 JSON `{"operation_id":"调用方稳定生成的标识"}`。确认返回既有导入报告；基线过期和操作 ID 冲突分别以 409 及不同错误代码返回。
+教师或管理员登录后可使用以下题库管理接口。向 `POST /teacher/banks/{bank_id}/import-previews` 以 multipart `file` 上传 XLSX；有效预览返回 `preview_id`、行级变化及问题，错误文件返回 422 和行列信息。可通过 `GET /teacher/banks/{bank_id}/import-previews/{preview_id}` 恢复预览；确认时向对应的 `/confirm` 发送 JSON `{"operation_id":"调用方稳定生成的标识"}`。确认返回既有导入报告；基线过期和操作 ID 冲突分别以 409 及不同错误代码返回。
 
 原始 XLSX 与预览基线暂存在 `TASKBANK_PREVIEW_ROOT` 指定的私有持久目录，默认 `uploads/import-previews`，被 Git 忽略；配置目录应在所有服务实例间保持一致并限制操作系统访问权限。预览不会自动过期或清理，以支持重启与重试；后续需要运维安排清理，但不要删除仍需确认或重试的预览。
 
@@ -80,11 +80,23 @@ PR 工作流始终运行文档检查及稳定的 `PR result` 汇总检查。纯 
 
 DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启动命令为 `python -m app.media.tts_worker`（从 `backend` 目录执行）。发布调用应显式冻结 `provider=dashscope`、模型、音色、`version=cosyvoice-sdk-v2`、语速、`format=wav` 和 `sample_rate`；可选地域和业务空间也必须由调用方明确提供。本阶段只支持 WAV，其他配置会明确拒绝，不会静默忽略。合成不会修改冻结的原文。
 
-教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 返回等待独立 Worker 扫描的提示；202 不表示已扫描、已开始生成或已立即排队。`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。这些音频管理接口需要共享管理 Bearer 凭据。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
+教师管理接口 `GET /teacher/papers/{paper_id}/audio` 查询任务和诊断，`POST /teacher/papers/{paper_id}/audio/prepare` 返回等待独立 Worker 扫描的提示；202 不表示已扫描、已开始生成或已立即排队。`POST /teacher/papers/{paper_id}/audio/{audio_id}/retry` 授权重试，`GET /teacher/papers/{paper_id}/audio/{audio_id}/content` 校验后试听。这些音频管理接口需要教师或管理员登录。外呼结果不明确时需在重试请求中明确传入 `accept_unknown=true`，因为可能已经产生费用；不存在外部调用恰好一次的保证。已完成音频的文件损坏或丢失会阻止使用，不会自动重合成或覆盖历史资源。
 
 ## 评价调度入口
 
 `app.evaluation.worker.run_once()` 执行一轮有界调度，调用方需提供数据库 engine、评价合同 Registry、适配器映射、租约时长和批次大小，并按部署需要重复调用。当前没有生产评价适配器；空映射不会产生成功评价。已被重做取代且尚未跨过外发边界的作业会标记为 `SKIPPED`；跨过外发边界后的旧调用可能仍产生费用并保留历史结果。外呼结果不明的作业必须显式授权后才可重试。
+
+Speaking 过程识别与正式 Submission 评价独立：保存 Segment 后原子创建过程识别操作，Session 状态中返回操作身份与识别状态。当前没有常驻过程 ASR 调度器；部署方可在 `backend` 目录显式执行 `python -m app.task_types.speaking_asr_worker <operation_id> --region <region> --workspace <workspace>`。该命令会使用私有环境变量 `DASHSCOPE_API_KEY` 并可能产生费用，运行前须获得相应授权；本任务测试只使用离线替身。每次执行最多外发一次，不自动重试。租约过期但未跨外发边界可重新领取，跨过边界后保守记为 UNKNOWN。FAILED 可通过 Session 授权的 `POST /assessment/sessions/{session_id}/tasks/{task_id}/segments/{segment_id}/asr/retry` 明确恢复，JSON 包含 `attempt_id`、稳定 `request_id`、查询返回的 `expected_attempts`；UNKNOWN 还须明确传 `accept_unknown: true`。恢复后仍须执行 Worker，刷新页面不会自动重试或调用供应商。真实 Qwen 空文本目前缺少已确认的无语音语义，不作为 Checkpoint B；需供应商合同核实后再映射。
+
+Speaking 主动求助使用 `POST /assessment/sessions/{session_id}/tasks/{task_id}/help-requests`，请求包含 `attempt_id` 与稳定 `request_id`。操作保存当前 Segment/ASR 输入前沿，成功生成文本仅到 Checkpoint C，仍等待后续语音交付。过程不自动发起模型请求；部署方明确授权后，在 `backend` 目录使用 `python -m app.task_types.speaking_guidance_worker <help_request_id> --region <region> --workspace <workspace> --model <model>` 执行一次。`SPEAKING_GUIDANCE_PROMPT_FILE` 指向私有 UTF-8 系统 Prompt 文件，每次执行读取当前内容并记录摘要；`DASHSCOPE_API_KEY` 仅由后端读取。执行历史保留尝试身份、结果及 Prompt 摘要，不保存完整 Prompt。Worker 不自动重发，超时或外发后崩溃以 UNKNOWN 保留；恢复端点为 `/help-requests/{help_id}/retry`，包含 `attempt_id`、稳定 `request_id`、`expected_attempts`，UNKNOWN 必须明确 `accept_unknown: true`。确认最终失败后可使用 `/help-requests/{help_id}/void` 作废并解除占用；UNKNOWN 作废同样需要明确确认。缺失 Prompt 或无效本地配置会记录可恢复的配置故障，不伪造模型结果。
+
+Checkpoint C 后生成独立的引导音频操作，Session 状态返回其 `audio_id`。部署方获得调用授权后，可在 `backend` 目录执行 `python -m app.task_types.speaking_tts_worker <audio_id> --config-json '<JSON>'`；JSON 明确提供 `provider`、`model`、`voice`、`version`、`speed`、`format`、`sample_rate` 及所需 `region`/`workspace`，不得包含凭据。CosyVoice 适配器要求 `provider` 为 `dashscope`、`version` 为 `cosyvoice-sdk-v2`、格式为 `wav`，API Key 仅从后端私有环境读取。该命令可能产生费用，本轮测试没有外呼。失败可通过 `/help-requests/{help_id}/audio/retry` 显式恢复，参数为 `attempt_id`、`request_id`、`expected_attempts`，UNKNOWN 额外要求 `accept_unknown: true`；恢复后仍须显式运行 Worker。音频就绪不代表已交付：客户端须使用公共 Playback 的 `GUIDANCE` 及对应 `help_request_id` 创建播放，并以相同 Playback 身份确认完整播放，服务端在同一事务中形成 Checkpoint D。实际播放失败后使用原播放身份创建 `TECHNICAL_RETRY`，复用原音频。
+
+Speaking 主动重播使用公共 Playback 的 `USER_REPLAY` 和稳定 `request_id`，无需客户端指定音频：服务端选择本 Attempt 最近成功交付的引导；没有引导时选择发布的初始题音。失败后可使用 `TECHNICAL_RETRY` 的 `retry_of_id` 指向原始重播并复用其音频。Session 状态提供当前目标、可用性、活动重播及从完整交付事实推导的 `replay_count`；首次交付、失败及技术重试不会单独增加计数。
+
+Speaking 的最低累计录音时长是数据库中的当前运行政策，初始未配置。管理员可通过 `PUT /teacher/assessment/speaking-policy` 设置正数 `minimum_duration_seconds`，通过同一路径的 GET 查询；施测 Session 凭据不能修改该政策。政策变更立即影响未提交 Attempt，不改变已接受的 Submission。Session 状态返回当前门槛、累计时长、资格及原因；符合条件只开放 `FINISH_SPEAKING`，不会自动提交。儿童显式调用 `POST /assessment/sessions/{session_id}/tasks/{task_id}/submissions/speaking`，传入 `attempt_id` 和稳定 `finish_request_id`；成功后重传相同身份可恢复 Submission。`speaking-input-v1` 清单固定有序录音及 ASR 身份、已交付求助、有效重播、实际政策值和版本；评分适配器须消费该清单，正式 Speaking 评价适配器仍待后续实现。
+
+Speaking 正式评价 Worker 独立核验 `speaking-input-v1`，将完整有序来源及其 `speaking-source-v1` SHA-256 固定在 Job/RawEvaluation 的 `input_refs.speaking_source`，与适配器消费引用和 payload 一并参与指纹。未来 Speaking `EvaluationContract` 必须提供 `speaking_consumption_validator(source, consumption, requirement, upstream, payload)`，并在 `InputSnapshot.refs.speaking_consumption` 声明实际输入；回调须校验来源归属、消费与上游身份及可用的 payload，审计已保存证据时 `payload` 为 `None`，仍须校验引用。可用 `segment_ids` 声明片段子集，`derived_recordings` 声明包含 `storage_ref`、`sha256`、`media_type` 的派生音频；Worker 在领取及外呼前核验音频字节。不同根目录可通过 `recording_store` 和 `derived_recording_store` 显式注入。完整来源锚定不要求每个评价源消费所有片段；具体粒度、派生规则及正式 Speaking 评价合同尚未确定。
 
 ## 结算扫描入口
 
@@ -96,17 +108,15 @@ DashScope 固定音频 Worker 使用私有环境变量 `DASHSCOPE_API_KEY`，启
 
 ### 教师复核凭据
 
-题库及资源管理继续使用私有 `TEACHER_MANAGEMENT_TOKEN`。复核写入使用独立的个人高熵随机 Bearer Token；服务端私有环境变量 `TEACHER_REVIEW_TOKEN_HASHES` 保存 JSON 对象，键为稳定教师身份，值为对应 Token 的 SHA-256 十六进制摘要。配置结构示例：`{"teacher-id-a":"<sha256-hex>","teacher-id-b":"<sha256-hex>"}`；占位内容不能直接用于认证。每位教师使用不同 Token，任何摘要不得重复，也不得与共享管理 Token 对应的摘要相同。通过安全渠道生成、分发和轮换凭据，不将原始 Token 或摘要提交仓库、写入日志或 URL。
-
-个人复核 Token 可访问教师评分查询及复核决定接口，不能访问题库或资源管理接口；共享管理 Token 可查询但不能作为复核操作人的身份。未配置或配置无效时复核写入失败关闭，不影响共享管理 Token 的既有管理访问。当前凭据不提供班级、学校或组织级细粒度授权，生产评分 Registry 尚无正式插件。
+教师和管理员使用各自登录会话执行复核；服务端从已认证用户取得稳定身份，客户端不能指定操作者。历史复核身份保持原样，详见 [AUTH-01](docs/design/AUTH_01_TEACHER_IDENTITY.md)。
 
 ### 施测 Session 与访问凭据
 
-共享管理凭据可调用 `POST /teacher/assessment/sessions`，提交 `paper_id`、稳定的 `create_request_id` 和 V1 `review_policy` 创建 Session。重复创建请求返回同一 Session，不签发或改变访问凭据；不同参数复用请求标识会冲突。新 Session 必须使用可解释的 V1 复核策略，既有历史策略的幂等重传保持原样。
+教师或管理员可调用 `POST /teacher/assessment/sessions`，提交 `paper_id`、稳定的 `create_request_id` 和 V1 `review_policy` 创建 Session。重复创建请求返回同一 Session，不签发或改变访问凭据；不同参数复用请求标识会冲突。新 Session 必须使用可解释的 V1 复核策略，既有历史策略的幂等重传保持原样。
 
 管理方调用 `POST /teacher/assessment/sessions/{session_id}/access-token` 明确签发高熵 Session Bearer Token。明文只在这次响应中返回，数据库仅保存摘要，响应禁止缓存；通过受控渠道将 Token 交给施测端，不将其写入 URL、日志或仓库。每次调用都是**追加签发**：之前的 Token 继续有效，不隐式轮换或限制设备数量。若响应丢失或 Token 遗失，管理方再次签发新的 Token；数据库无法恢复旧明文。签发响应包含 `credential_id`，用于管理该凭据。
 
-凭据泄漏时，管理方使用共享管理凭据调用 `GET /teacher/assessment/sessions/{session_id}/access-tokens` 查询凭据身份、签发与撤销时间和有效状态；响应不包含 Token 或摘要。确认单个泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/{credential_id}/revoke` 撤销；无法识别泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/revoke-all` 撤销该场所有当前有效凭据。两种撤销均可重复调用。随后可显式追加签发新 Token，并通过安全渠道交付给施测端。
+凭据泄漏时，教师或管理员登录后调用 `GET /teacher/assessment/sessions/{session_id}/access-tokens` 查询凭据身份、签发与撤销时间和有效状态；响应不包含 Token 或摘要。确认单个泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/{credential_id}/revoke` 撤销；无法识别泄漏凭据时，调用 `POST /teacher/assessment/sessions/{session_id}/access-tokens/revoke-all` 撤销该场所有当前有效凭据。两种撤销均可重复调用。随后可显式追加签发新 Token，并通过安全渠道交付给施测端。
 
 撤销只改变后续访问资格，不重置 Session 或作答进度；新凭据可恢复原有 Attempt 与 Submission。撤销不会取消已经完成认证并开始读取的在途只读请求，也无法删除客户端下载的资源。不要将 Token 或摘要写入 URL、日志或仓库。
 
