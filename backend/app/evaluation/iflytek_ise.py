@@ -100,10 +100,12 @@ def parse_xml(xml):
         except_info = node.get("except_info", "0")
         if not except_info.isdigit():
             raise ValueError
+        rejected_result = rejected in ("true", "1") or except_info != "0"
         values = {}
         for key in SCORES:
             raw = node.get(key)
-            value = float(raw) if raw not in (None, "") else None
+            # A rejected result must retain its diagnostic even if its scores are unusable.
+            value = None if rejected_result or raw in (None, "") else float(raw)
             if value is not None and not math.isfinite(value):
                 raise ValueError
             values[key] = value

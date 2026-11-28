@@ -60,7 +60,7 @@ def test_signature_contains_expected_host_and_time():
 
 
 @pytest.mark.parametrize(
-    "scenario", ["ready", "optional", "rejected", "invalid", "timeout", "provider_error"]
+    "scenario", ["ready", "optional", "rejected", "rejected_nonfinite", "invalid", "timeout", "provider_error"]
 )
 def test_repetition_to_ise_worker(db, bank, client, repetition, tmp_path, monkeypatch, scenario):
     tools = AudioTools()
@@ -100,10 +100,12 @@ def test_repetition_to_ise_worker(db, bank, client, repetition, tmp_path, monkey
     with Session(db) as session, session.begin():
         assert schedule(session) == 1
     xml = '<xml_result><read_sentence><rec_paper><read_sentence total_score="88.5" is_rejected="false" except_info="0" accuracy_score="91"><sentence content="test"><word content="a"><syll perr_msg="1"/></word></sentence></read_sentence></rec_paper></read_sentence></xml_result>'
-    if scenario == "rejected":
+    if scenario in ("rejected", "rejected_nonfinite"):
         xml = xml.replace('is_rejected="false"', 'is_rejected="true"').replace(
             'except_info="0"', 'except_info="28676"'
         )
+        if scenario == "rejected_nonfinite":
+            xml = xml.replace('total_score="88.5"', 'total_score="NaN"')
     if scenario == "optional":
         xml = xml.replace(' accuracy_score="91"', "")
     if scenario == "invalid":
@@ -137,6 +139,7 @@ def test_repetition_to_ise_worker(db, bank, client, repetition, tmp_path, monkey
             "ready": "READY",
             "optional": "READY",
             "rejected": "FAILED",
+            "rejected_nonfinite": "FAILED",
             "invalid": "INVALID",
             "timeout": "UNKNOWN",
             "provider_error": "FAILED",
@@ -149,7 +152,7 @@ def test_repetition_to_ise_worker(db, bank, client, repetition, tmp_path, monkey
             )
             assert raw.payload["request"]["group"] == "adult"
             assert raw.input_refs["dependencies"]["recording_id"] == recording
-        if scenario == "rejected":
+        if scenario in ("rejected", "rejected_nonfinite"):
             assert raw.payload is None and raw.error_code == "ISE_REJECTED"
             evidence = session.get(EvaluationDiagnosticEvidence, raw.evaluation_id).evidence
             assert (
